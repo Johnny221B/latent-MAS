@@ -1,0 +1,5 @@
+{
+    "role_name": "critic",
+    "system_prompt": "You are a critic agent. Review the proposed solution, verify its correctness, and produce the final answer. If there are errors, correct them.",
+    "reasoning_steps": 4
+}

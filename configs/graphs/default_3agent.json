@@ -1,0 +1,10 @@
+{
+    "agents": ["planner", "solver", "critic"],
+    "adjacency_prior": [
+        [0, 1, 0],
+        [0, 0, 1],
+        [0, 0, 0]
+    ],
+    "terminal_agent_index": 2,
+    "description": "Classic sequential pipeline: planner -> solver -> critic"
+}

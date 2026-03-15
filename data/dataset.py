@@ -1,0 +1,121 @@
+"""
+Unified dataset interface for loading and preprocessing benchmarks.
+
+Each task provides (question, answer) pairs.
+The dataset handles tokenization and label preparation.
+
+Extensibility:
+  - Add new tasks by adding entries to TASK_CONFIGS.
+  - Each config specifies the HF dataset name, split, and field mappings.
+"""
+
+from torch.utils.data import Dataset
+
+
+class MultiAgentDataset(Dataset):
+    """Dataset wrapper that provides (question, answer) pairs for training."""
+
+    def __init__(
+        self,
+        task: str = "gsm8k",
+        split: str = "train",
+        max_samples: int | None = None,
+    ):
+        """
+        Args:
+            task: task name (key in TASK_CONFIGS)
+            split: dataset split
+            max_samples: limit number of samples (for debugging)
+        """
+        from datasets import load_dataset
+
+        task_config = TASK_CONFIGS.get(task)
+        if task_config is None:
+            raise ValueError(f"Unknown task: {task}. Available: {list(TASK_CONFIGS.keys())}")
+
+        # Load from HuggingFace datasets
+        raw = load_dataset(
+            task_config["dataset"],
+            task_config.get("subset", None),
+            split=split,
+        )
+
+        if max_samples is not None:
+            raw = raw.select(range(min(max_samples, len(raw))))
+
+        self.data = raw
+        self.question_field = task_config["question_field"]
+        self.answer_field = task_config["answer_field"]
+        self.answer_extractor = task_config.get("answer_extractor", None)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> dict:
+        item = self.data[idx]
+        question = item[self.question_field]
+
+        # Extract clean answer
+        raw_answer = item[self.answer_field]
+        if self.answer_extractor is not None:
+            answer = self.answer_extractor(raw_answer)
+        else:
+            answer = str(raw_answer)
+
+        return {
+            "question": question,
+            "answer": answer,
+        }
+
+
+def _extract_gsm8k_answer(answer_text: str) -> str:
+    """Extract the numeric answer from GSM8K's answer field."""
+    # GSM8K answers are formatted as "explanation\n#### <number>"
+    if "####" in answer_text:
+        return answer_text.split("####")[-1].strip()
+    return answer_text.strip()
+
+
+def _extract_arc_answer(answer_key: str) -> str:
+    """ARC answers are just the letter key (A/B/C/D)."""
+    return str(answer_key).strip()
+
+
+# ── Task Registry ──
+TASK_CONFIGS = {
+    "gsm8k": {
+        "dataset": "openai/gsm8k",
+        "subset": "main",
+        "question_field": "question",
+        "answer_field": "answer",
+        "answer_extractor": _extract_gsm8k_answer,
+    },
+    "arc_easy": {
+        "dataset": "allenai/ai2_arc",
+        "subset": "ARC-Easy",
+        "question_field": "question",
+        "answer_field": "answerKey",
+        "answer_extractor": _extract_arc_answer,
+    },
+    "arc_challenge": {
+        "dataset": "allenai/ai2_arc",
+        "subset": "ARC-Challenge",
+        "question_field": "question",
+        "answer_field": "answerKey",
+        "answer_extractor": _extract_arc_answer,
+    },
+}
+
+
+def create_dataset(task: str, split: str = "train", max_samples: int | None = None) -> MultiAgentDataset:
+    """Factory function to create a dataset.
+
+    Args:
+        task: task name
+        split: dataset split
+        max_samples: limit samples (for debugging)
+
+    Returns:
+        MultiAgentDataset instance
+    """
+    return MultiAgentDataset(task=task, split=split, max_samples=max_samples)

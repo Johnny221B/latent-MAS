@@ -1,0 +1,43 @@
+# ── Environment & Weights (large files, local only) ──
+envs/
+weights/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ──
+.venv/
+venv/
+ENV/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Jupyter ──
+.ipynb_checkpoints/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Training outputs ──
+outputs/
+logs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+
+# ── Data cache ──
+.cache/
