@@ -1,3 +1,4 @@
+# src/models/agent.py
 """
 Agent: a role-aware wrapper around a base model.
 
@@ -83,25 +84,21 @@ class Agent:
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Perform latent reasoning and return hidden-state trajectory.
-
-        This is the core computation of an agent:
-        1. Build input: [role_prompt; task_description]
-        2. Prepend upstream_prefix as latent embeddings (if any)
-        3. Run forward through frozen base model
-        4. Extract hidden states as the reasoning trajectory S_i
+    ) -> dict:
+        """Perform latent reasoning and return outputs.
 
         Args:
             task_token_ids: [batch_size, task_seq_len]
             task_attention_mask: [batch_size, task_seq_len] or None
             upstream_prefix: [batch_size, Lp, hidden_dim] or None
-                Aggregated latent prefix from upstream agents.
 
         Returns:
-            S_i: [batch_size, output_seq_len, hidden_dim]
-                The hidden-state trajectory representing this agent's reasoning.
-                output_seq_len = (prefix_len) + role_len + task_seq_len
+            dict with:
+                - full_hidden: [B, prefix_len + text_len, D]
+                    Full hidden trajectory S_i for compression.
+                - logits: [B, text_len, V]
+                    Text-only logits (prefix positions already sliced off).
+                - prefix_len: int
         """
         # Build the text part of input
         input_ids = self.build_input_ids(task_token_ids)  # [B, role_len + task_len]
@@ -125,10 +122,15 @@ class Agent:
             prefix_embeds=upstream_prefix,
             output_hidden_states=True,
         )
+        
+        role_len = self._get_role_token_ids().shape[1]
 
-        # Return the last hidden state as the reasoning trajectory S_i
-        # Shape: [B, total_seq_len, D] where total = prefix_len + role_len + task_len
-        return outputs["last_hidden_state"]
+        return {
+            "full_hidden": outputs["full_last_hidden_state"],  # for compressor
+            "logits": outputs["logits"][:, role_len:, :],      # task-only, for loss
+            "prefix_len": outputs["prefix_len"],
+            "role_len": role_len,
+        }
 
     def __repr__(self) -> str:
         return f"Agent(id={self.agent_id}, role={self.role_name})"

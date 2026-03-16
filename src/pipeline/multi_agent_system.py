@@ -101,6 +101,7 @@ class MultiAgentSystem(nn.Module):
         self.graph_loss_fn = GraphLoss(
             lambda_add=training_cfg.get("lambda_add", 0.1),
             lambda_drop=training_cfg.get("lambda_drop", 0.5),
+            lambda_sparse=training_cfg.get("lambda_sparse", 0.1),
         )
 
     def forward(
@@ -151,7 +152,7 @@ class MultiAgentSystem(nn.Module):
         # the full model, but we need the logits output.
         # Let's get logits by applying the LM head to final hidden states.
         lm_head = self.base_model.model.lm_head
-        final_logits = lm_head(final_hidden)  # [B, seq_len, vocab_size]
+        final_logits = dag_output["final_logits"]  # [B, seq_len, vocab_size]
 
         result = {
             "final_hidden": final_hidden,
@@ -164,7 +165,8 @@ class MultiAgentSystem(nn.Module):
         if labels is not None:
             # Task loss
             prefix_len = self.compressor.num_queries if self.n_agents > 1 else 0
-            task_loss = self.task_loss_fn(final_logits, labels, prefix_len=prefix_len)
+            # task_loss = self.task_loss_fn(final_logits, labels, prefix_len=prefix_len)
+            task_loss = self.task_loss_fn(final_logits, labels)
 
             # Graph loss
             graph_loss_dict = self.graph_loss_fn(A, self.adjacency.prior)

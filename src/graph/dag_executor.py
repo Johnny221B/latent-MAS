@@ -58,8 +58,9 @@ class DAGExecutor:
         n = len(agents)
         B = task_token_ids.shape[0]
 
-        all_hidden = []      # S_i for each agent
+        all_hidden = []      # full S_i for each agent (for compressor)
         all_prefixes = []    # compressed P_i for each agent
+        final_logits = None  # text-only logits from terminal agent
 
         for j in range(n):
             # ── Step 1: Aggregate upstream prefixes ──
@@ -70,23 +71,26 @@ class DAGExecutor:
             )
 
             # ── Step 2: Agent reasoning ──
-            S_j = agents[j].reason(
+            agent_output = agents[j].reason(
                 task_token_ids=task_token_ids,
                 task_attention_mask=task_attention_mask,
                 upstream_prefix=upstream_prefix,
             )
+            S_j = agent_output["full_hidden"]  # [B, full_seq, D]
             all_hidden.append(S_j)
 
             # ── Step 3: Compress for downstream agents ──
-            # (Skip compression for the terminal agent — no one reads it)
             if j < n - 1:
                 P_j = compressor(S_j)  # [B, Lp, D]
                 all_prefixes.append(P_j)
             else:
-                all_prefixes.append(None)  # terminal, no prefix needed
+                all_prefixes.append(None)
+                # Terminal agent: capture text-only logits for loss
+                final_logits = agent_output["logits"]  # [B, text_len, V]
 
         return {
             "final_hidden": all_hidden[-1],
+            "final_logits": final_logits,
             "all_hidden": all_hidden,
             "all_prefixes": all_prefixes,
         }

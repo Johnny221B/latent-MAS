@@ -1,3 +1,4 @@
+# src/models/compressor.py
 """
 LatentCompressor: compresses variable-length hidden states into fixed-length prefix.
 
@@ -103,3 +104,15 @@ class LatentCompressor(nn.Module):
         x = self.norm2(x + self.ffn(x))
 
         return x  # [B, Lp, D]
+
+# 上游 hidden trajectory [B, S, D]
+#         ↓
+# learnable queries [B, Lp, D]
+#         ↓
+# cross-attention: queries attend to hidden_states
+#         ↓
+# 得到 attn_out [B, Lp, D]
+#         ↓
+# residual + norm + FFN
+#         ↓
+# 输出 prefix [B, Lp, D]

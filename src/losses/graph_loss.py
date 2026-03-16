@@ -1,3 +1,4 @@
+# src/losses/graph_loss.py
 """
 GraphLoss: regularization loss for the learnable adjacency matrix.
 
@@ -20,7 +21,7 @@ import torch.nn as nn
 class GraphLoss(nn.Module):
     """Asymmetric graph regularization loss."""
 
-    def __init__(self, lambda_add: float = 0.1, lambda_drop: float = 0.5):
+    def __init__(self, lambda_add: float = 0.1, lambda_drop: float = 0.5, lambda_sparse: float = 0.1):
         """
         Args:
             lambda_add: weight for penalizing new edges (not in prior)
@@ -29,6 +30,7 @@ class GraphLoss(nn.Module):
         super().__init__()
         self.lambda_add = lambda_add
         self.lambda_drop = lambda_drop
+        self.lambda_sparse = lambda_sparse
 
     def forward(
         self,
@@ -64,10 +66,19 @@ class GraphLoss(nn.Module):
         loss_drop = (1.0 - adjacency[drop_mask]).sum()
 
         # Total
-        loss = self.lambda_add * loss_add + self.lambda_drop * loss_drop
+        # L1 sparsity: penalize all non-zero edge weights in upper triangle
+        loss_sparse = adjacency[valid_mask].sum()
+
+        # Total
+        loss = (
+            self.lambda_add * loss_add
+            + self.lambda_drop * loss_drop
+            + self.lambda_sparse * loss_sparse
+        )
 
         return {
             "loss": loss,
             "loss_add": loss_add,
             "loss_drop": loss_drop,
+            "loss_sparse": loss_sparse,
         }
