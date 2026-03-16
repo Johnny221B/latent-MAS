@@ -1,3 +1,4 @@
+# src/models/base_model.py
 """
 BaseModelWrapper: loads and wraps a frozen HuggingFace causal LM.
 
@@ -14,7 +15,6 @@ Extensibility:
     with different model names. Downstream modules should read hidden_dim
     from wrapper.model_config rather than assuming a shared constant.
 """
-# src/models/base_model.py
 
 import os
 
@@ -184,6 +184,130 @@ class BaseModelWrapper(nn.Module):
             "logits": text_logits,                    # text-only, for task loss
             "last_hidden_state": text_hidden,         # text-only
             "full_last_hidden_state": full_last_hidden,  # full, for compressor
+            "prefix_len": prefix_len,
+        }
+        
+    @torch.no_grad()
+    def generate_with_hidden(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.Tensor | None = None,
+        prefix_embeds: torch.Tensor | None = None,
+        max_new_tokens: int = 64,
+        temperature: float = 0.6,
+        top_p: float = 0.95,
+    ) -> dict:
+        """Auto-regressive generation that collects hidden states at each step.
+
+        This is the core of agent reasoning: the LLM actually "thinks" by
+        generating tokens, and we capture the hidden trajectory.
+
+        Args:
+            input_ids: [B, seq_len]
+            attention_mask: [B, seq_len] or None
+            prefix_embeds: [B, Lp, D] or None
+            max_new_tokens: number of reasoning tokens to generate (m)
+            temperature: sampling temperature
+            top_p: nucleus sampling threshold
+
+        Returns:
+            dict with:
+                - hidden_trajectory: [B, m, D]
+                    Last-layer hidden state at each generation step.
+                    This is the reasoning trace S_i for compression.
+                - generated_ids: [B, m]
+                    The token IDs generated (for debugging / logging).
+                - full_hidden: [B, input_len + m, D]
+                    Complete hidden states including input encoding.
+        """
+        B = input_ids.shape[0]
+        device = input_ids.device
+
+        # Step 1: Encode input (with optional prefix)
+        token_embeds = self.get_input_embeddings(input_ids)
+        prefix_len = 0
+
+        if prefix_embeds is not None:
+            prefix_embeds = prefix_embeds.to(dtype=token_embeds.dtype, device=device)
+            prefix_len = prefix_embeds.shape[1]
+            inputs_embeds = torch.cat([prefix_embeds, token_embeds], dim=1)
+            if attention_mask is not None:
+                prefix_mask = torch.ones(B, prefix_len, device=device, dtype=attention_mask.dtype)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+        else:
+            inputs_embeds = token_embeds
+
+        # Initial forward to get KV cache
+        outputs = self.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            use_cache=True,
+            output_hidden_states=True,
+        )
+        past_key_values = outputs.past_key_values
+
+        # Collect the input encoding hidden states
+        input_hidden = outputs.hidden_states[-1]  # [B, prefix+input_len, D]
+
+        # Step 2: Auto-regressive generation, collecting hidden states
+        hidden_trajectory = []
+        generated_ids = []
+
+        # Start from the last token's logits
+        next_logits = outputs.logits[:, -1, :]  # [B, V]
+
+        for step in range(max_new_tokens):
+            # Sample next token
+            if temperature > 0:
+                probs = torch.softmax(next_logits / temperature, dim=-1)
+                # Top-p filtering
+                sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                cumsum = torch.cumsum(sorted_probs, dim=-1)
+                mask = cumsum - sorted_probs > top_p
+                sorted_probs[mask] = 0.0
+                sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
+                next_token = sorted_indices.gather(1, torch.multinomial(sorted_probs, 1))
+            else:
+                next_token = next_logits.argmax(dim=-1, keepdim=True)
+
+            generated_ids.append(next_token)  # [B, 1]
+
+            # Update attention mask
+            if attention_mask is not None:
+                attention_mask = torch.cat([
+                    attention_mask,
+                    torch.ones(B, 1, device=device, dtype=attention_mask.dtype),
+                ], dim=1)
+
+            # Forward with KV cache (only the new token)
+            next_embeds = self.get_input_embeddings(next_token)  # [B, 1, D]
+            outputs = self.model(
+                inputs_embeds=next_embeds,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                output_hidden_states=True,
+            )
+
+            past_key_values = outputs.past_key_values
+            step_hidden = outputs.hidden_states[-1]  # [B, 1, D]
+            hidden_trajectory.append(step_hidden)
+            next_logits = outputs.logits[:, -1, :]
+
+            # Stop at EOS
+            eos_id = self.tokenizer.eos_token_id
+            if eos_id is not None and (next_token == eos_id).all():
+                break
+
+        # Stack results
+        hidden_trajectory = torch.cat(hidden_trajectory, dim=1)  # [B, m, D]
+        generated_ids = torch.cat(generated_ids, dim=1)          # [B, m]
+        full_hidden = torch.cat([input_hidden, hidden_trajectory], dim=1)
+
+        return {
+            "hidden_trajectory": hidden_trajectory,  # reasoning trace for compressor
+            "generated_ids": generated_ids,           # for debugging
+            "full_hidden": full_hidden,               # complete trajectory
             "prefix_len": prefix_len,
         }
 

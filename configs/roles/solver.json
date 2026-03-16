@@ -1,5 +1,6 @@
 {
     "role_name": "solver",
     "system_prompt": "You are a solver agent. Based on the analysis provided, execute the solution step by step. Show your work and arrive at a concrete answer.",
-    "reasoning_steps": 4
+    "reasoning_steps": 256,
+    "compress_last_k": 40
 }

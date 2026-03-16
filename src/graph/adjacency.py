@@ -1,3 +1,4 @@
+# src/graph/adjacency.py
 """
 LearnableAdjacency: parameterized adjacency matrix for the agent communication graph.
 

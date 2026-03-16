@@ -4,7 +4,7 @@ model:
   frozen: true
 
 graph:
-  config: "configs/graphs/default_3agent.json"
+  config: "configs/graphs/default_5agent.json"
   roles_dir: "configs/roles"
 
 compressor:
@@ -27,7 +27,8 @@ training:
   save_interval: 500
 
 reasoning:
-  steps_per_agent: 4     # m reasoning steps per agent
+  steps_per_agent: 256      # total generation tokens per agent
+  compress_last_k: 40       # only compress last k hidden states
 
 output:
   dir: "outputs"

@@ -76,21 +76,38 @@ class DAGExecutor:
                 task_attention_mask=task_attention_mask,
                 upstream_prefix=upstream_prefix,
             )
-            S_j = agent_output["full_hidden"]  # [B, full_seq, D]
-            all_hidden.append(S_j)
+            S_j = agent_output["hidden_trajectory"]  # [B, m, D]
+            mask_j = agent_output["compressor_mask"]
+            # all_hidden.append(S_j)
 
             # ── Step 3: Compress for downstream agents ──
+            # if j < n - 1:
+            #     P_j = compressor(S_j, mask_j)  # [B, Lp, D]
+            #     all_prefixes.append(P_j)
+            # else:
+            #     all_prefixes.append(None)
+            #     # Terminal agent: capture text-only logits for loss
+            #     final_logits = agent_output["logits"]  # [B, text_len, V]
             if j < n - 1:
-                P_j = compressor(S_j)  # [B, Lp, D]
+                # Non-terminal: generation → compress → pass downstream
+                P_j = compressor(S_j, mask=mask_j)
                 all_prefixes.append(P_j)
             else:
+                # Terminal: forward pass to get logits for CE loss
                 all_prefixes.append(None)
-                # Terminal agent: capture text-only logits for loss
-                final_logits = agent_output["logits"]  # [B, text_len, V]
+                terminal_output = agents[j].forward_for_loss(
+                    task_token_ids=task_token_ids,
+                    task_attention_mask=task_attention_mask,
+                    upstream_prefix=upstream_prefix,
+                )
 
+        # return {
+        #     "final_hidden": all_hidden[-1],
+        #     "final_logits": final_logits,
+        #     "all_hidden": all_hidden,
+        #     "all_prefixes": all_prefixes,
+        # }
         return {
-            "final_hidden": all_hidden[-1],
-            "final_logits": final_logits,
-            "all_hidden": all_hidden,
+            "final_logits": terminal_output["logits"],
             "all_prefixes": all_prefixes,
         }

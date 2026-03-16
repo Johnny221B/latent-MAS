@@ -1,0 +1,12 @@
+{
+    "agents": ["reader", "planner", "analyst", "solver", "summarizer"],
+    "adjacency_prior": [
+        [0, 1, 1, 0, 0],
+        [0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 0]
+    ],
+    "terminal_agent_index": 4,
+    "description": "Two-path graph: reader->planner->solver->summarizer and reader->analyst->summarizer"
+}

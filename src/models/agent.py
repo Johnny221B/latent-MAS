@@ -44,6 +44,8 @@ class Agent:
         self.reasoning_steps = role_config.get("reasoning_steps", 4)
         self.base_model = base_model
         self.max_seq_len = max_seq_len
+        self.reasoning_steps = role_config.get("reasoning_steps", 256)
+        self.compress_last_k = role_config.get("compress_last_k", 40)
 
         # Pre-tokenize the role prompt (system prompt)
         self._role_tokens = None  # lazily initialized
@@ -85,25 +87,23 @@ class Agent:
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
     ) -> dict:
-        """Perform latent reasoning and return outputs.
+        """Perform reasoning via auto-regressive generation and return hidden trajectory.
 
-        Args:
-            task_token_ids: [batch_size, task_seq_len]
-            task_attention_mask: [batch_size, task_seq_len] or None
-            upstream_prefix: [batch_size, Lp, hidden_dim] or None
+        The agent actually "thinks" by generating tokens. The hidden states
+        produced during generation form the reasoning trace S_i.
 
         Returns:
             dict with:
-                - full_hidden: [B, prefix_len + text_len, D]
-                    Full hidden trajectory S_i for compression.
-                - logits: [B, text_len, V]
-                    Text-only logits (prefix positions already sliced off).
-                - prefix_len: int
+                - hidden_trajectory: [B, m, D] reasoning trace for compressor
+                - full_hidden: [B, input_len + m, D] complete hidden states
+                - logits: not available here (use generated_ids for eval)
+                - generated_ids: [B, m] generated tokens (for debugging)
+                - compressor_mask: [B, m] mask for hidden_trajectory (all 1s, no padding)
         """
-        # Build the text part of input
-        input_ids = self.build_input_ids(task_token_ids)  # [B, role_len + task_len]
+        # Build input: [role_prompt; task]
+        input_ids = self.build_input_ids(task_token_ids)
 
-        # Build attention mask for the text part
+        # Build attention mask
         if task_attention_mask is not None:
             role_mask = torch.ones(
                 task_attention_mask.shape[0],
@@ -115,21 +115,67 @@ class Agent:
         else:
             attention_mask = None
 
-        # Forward pass through frozen model with optional prefix
+        # Generate with hidden state collection
+        gen_output = self.base_model.generate_with_hidden(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            prefix_embeds=upstream_prefix,
+            max_new_tokens=self.reasoning_steps,
+        )
+
+        trajectory = gen_output["hidden_trajectory"]  # [B, m, D]
+        B, m, D = trajectory.shape
+
+        # Only compress the last k hidden states — these contain the most
+        # condensed reasoning since each position attends to all prior ones.
+        k = min(self.compress_last_k, m)  # handle case where generation < k
+        trajectory_to_compress = trajectory[:, -k:, :]  # [B, k, D]
+        compressor_mask = torch.ones(B, k, device=task_token_ids.device)
+
+        return {
+            "hidden_trajectory": trajectory_to_compress,  # [B, k, D] for compressor
+            "full_hidden": gen_output["full_hidden"],
+            "full_trajectory": trajectory,                 # [B, m, D] keep full for logging
+            "compressor_mask": compressor_mask,
+            "generated_ids": gen_output["generated_ids"],
+            "prefix_len": gen_output["prefix_len"],
+        }
+        
+    def forward_for_loss(
+        self,
+        task_token_ids: torch.LongTensor,
+        task_attention_mask: torch.Tensor | None = None,
+        upstream_prefix: torch.Tensor | None = None,
+    ) -> dict:
+        """Forward pass for terminal agent — returns logits for CE loss.
+
+        Unlike reason(), this does NOT generate tokens. It runs a single
+        forward pass and returns text-aligned logits for loss computation.
+        """
+        input_ids = self.build_input_ids(task_token_ids)
+
+        if task_attention_mask is not None:
+            role_mask = torch.ones(
+                task_attention_mask.shape[0],
+                self._get_role_token_ids().shape[1],
+                device=task_attention_mask.device,
+                dtype=task_attention_mask.dtype,
+            )
+            attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
+        else:
+            attention_mask = None
+
         outputs = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             prefix_embeds=upstream_prefix,
-            output_hidden_states=True,
+            output_hidden_states=False,
         )
-        
+
         role_len = self._get_role_token_ids().shape[1]
 
         return {
-            "full_hidden": outputs["full_last_hidden_state"],  # for compressor
-            "logits": outputs["logits"][:, role_len:, :],      # task-only, for loss
-            "prefix_len": outputs["prefix_len"],
-            "role_len": role_len,
+            "logits": outputs["logits"][:, role_len:, :],  # task-only logits
         }
 
     def __repr__(self) -> str:

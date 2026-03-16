@@ -1,3 +1,4 @@
+# src/pipeline/multi_agent_system.py
 """
 MultiAgentSystem: the top-level module that orchestrates everything.
 
@@ -72,6 +73,8 @@ class MultiAgentSystem(nn.Module):
             # Override reasoning steps from experiment config if provided
             if "reasoning" in config and "steps_per_agent" in config["reasoning"]:
                 role_config["reasoning_steps"] = config["reasoning"]["steps_per_agent"]
+            if "compress_last_k" in config["reasoning"]:
+                role_config["compress_last_k"] = config["reasoning"]["compress_last_k"]
             agent = Agent(
                 agent_id=i,
                 role_config=role_config,
@@ -140,45 +143,24 @@ class MultiAgentSystem(nn.Module):
             task_attention_mask=task_attention_mask,
         )
 
-        final_hidden = dag_output["final_hidden"]  # [B, seq_len, D]
-
-        # Get logits from the final hidden state via the LM head
-        # We need to project back to vocab space using the frozen model's LM head
-        with torch.no_grad():
-            # The lm_head is part of the frozen model
-            pass
-
-        # Actually, we need logits for loss. The final_hidden already went through
-        # the full model, but we need the logits output.
-        # Let's get logits by applying the LM head to final hidden states.
-        lm_head = self.base_model.model.lm_head
-        final_logits = dag_output["final_logits"]  # [B, seq_len, vocab_size]
+        final_logits = dag_output["final_logits"]  # [B, task_len, V]
 
         result = {
-            "final_hidden": final_hidden,
             "final_logits": final_logits,
             "adjacency": A,
-            "all_hidden": dag_output["all_hidden"],
         }
 
-        # Compute losses if labels are provided
         if labels is not None:
-            # Task loss
-            prefix_len = self.compressor.num_queries if self.n_agents > 1 else 0
-            # task_loss = self.task_loss_fn(final_logits, labels, prefix_len=prefix_len)
             task_loss = self.task_loss_fn(final_logits, labels)
-
-            # Graph loss
             graph_loss_dict = self.graph_loss_fn(A, self.adjacency.prior)
-
             total_loss = task_loss + graph_loss_dict["loss"]
-
             result.update({
                 "loss": total_loss,
                 "task_loss": task_loss,
                 "graph_loss": graph_loss_dict["loss"],
                 "graph_loss_add": graph_loss_dict["loss_add"],
                 "graph_loss_drop": graph_loss_dict["loss_drop"],
+                "graph_loss_sparse": graph_loss_dict["loss_sparse"],
             })
 
         return result
