@@ -169,7 +169,7 @@ class Agent:
             input_ids=input_ids,
             attention_mask=attention_mask,
             prefix_embeds=upstream_prefix,
-            output_hidden_states=False,
+            output_hidden_states=True,
         )
 
         role_len = self._get_role_token_ids().shape[1]
