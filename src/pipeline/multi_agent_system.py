@@ -100,6 +100,7 @@ class MultiAgentSystem(nn.Module):
 
         # ── Losses ──
         self.task_loss_fn = TaskLoss()
+        self.loss_mode = training_cfg.get("loss_mode", "ce")  # "ce" or "reward"
         training_cfg = config.get("training", {})
         self.graph_loss_fn = GraphLoss(
             lambda_add=training_cfg.get("lambda_add", 0.1),
@@ -151,7 +152,7 @@ class MultiAgentSystem(nn.Module):
         }
 
         if labels is not None:
-            task_loss = self.task_loss_fn(final_logits, labels)
+            task_loss = self.task_loss_fn(final_logits, labels, mode=self.loss_mode)
             graph_loss_dict = self.graph_loss_fn(A, self.adjacency.prior)
             total_loss = task_loss + graph_loss_dict["loss"]
             result.update({

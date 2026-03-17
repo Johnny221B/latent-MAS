@@ -119,7 +119,7 @@ def run_test(model_path: str):
     print(f"  labels shape: {labels.shape}")
 
     # Compute losses
-    task_loss = task_loss_fn(final_logits, labels)
+    task_loss = task_loss_fn(final_logits, labels, mode="reward")
     graph_loss_dict = graph_loss_fn(A, adjacency.prior)
     total_loss = task_loss + graph_loss_dict["loss"]
 
