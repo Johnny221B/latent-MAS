@@ -112,57 +112,63 @@ class MultiAgentSystem(nn.Module):
         self,
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
-        labels: torch.LongTensor | None = None,
+        answer_ids: torch.LongTensor | None = None,
+        answer_mask: torch.Tensor | None = None,
     ) -> dict:
-        """Full forward pass: execute DAG + compute losses.
+        """Full forward pass.
 
-        Args:
-            task_token_ids: [batch_size, task_seq_len]
-            task_attention_mask: [batch_size, task_seq_len]
-            labels: [batch_size, label_seq_len] ground truth tokens for loss.
-                    If None, only returns hidden states (inference mode).
+        Training (answer_ids provided):
+            non-terminal agents: latent reasoning → compress → prefix
+            terminal agent: forward_for_loss([prefix; role; question; answer]) → logits
+            loss computed on answer positions only
 
-        Returns:
-            dict with:
-                - loss: total loss (if labels provided)
-                - task_loss: task-specific loss
-                - graph_loss: graph regularization loss
-                - graph_loss_add: new-edge penalty
-                - graph_loss_drop: dropped-edge penalty
-                - final_hidden: [B, seq_len, D] terminal agent's hidden states
-                - adjacency: [n, n] current soft adjacency matrix
+        Inference (answer_ids is None):
+            non-terminal agents: latent reasoning → compress → prefix
+            terminal agent: generate_answer([prefix; role; question]) → text
         """
-        # Get current adjacency
         A = self.adjacency.get_adjacency()
+        is_training = answer_ids is not None
 
-        # Execute DAG
         dag_output = self.executor.execute(
             agents=self.agents,
             adjacency=A,
             compressor=self.compressor,
             task_token_ids=task_token_ids,
             task_attention_mask=task_attention_mask,
+            training=is_training,
+            answer_ids=answer_ids,
+            answer_mask=answer_mask,
         )
 
-        final_logits = dag_output["final_logits"]  # [B, task_len, V]
+        result = {"adjacency": A}
 
-        result = {
-            "final_logits": final_logits,
-            "adjacency": A,
-        }
+        if is_training:
+            final_logits = dag_output["final_logits"]
+            question_len = dag_output["question_len"]
 
-        if labels is not None:
-            task_loss = self.task_loss_fn(final_logits, labels, mode=self.loss_mode)
+            # Build labels: [-100, ..., -100, answer_tokens]
+            #               |-- question --|--- answer ---|
+            from data.dataset import build_labels
+            labels = build_labels(
+                question_len=question_len,
+                answer_ids=answer_ids,
+            )
+
+            task_loss = self.task_loss_fn(final_logits, labels)
             graph_loss_dict = self.graph_loss_fn(A, self.adjacency.prior)
             total_loss = task_loss + graph_loss_dict["loss"]
+
             result.update({
                 "loss": total_loss,
                 "task_loss": task_loss,
+                "final_logits": final_logits,
                 "graph_loss": graph_loss_dict["loss"],
                 "graph_loss_add": graph_loss_dict["loss_add"],
                 "graph_loss_drop": graph_loss_dict["loss_drop"],
                 "graph_loss_sparse": graph_loss_dict["loss_sparse"],
             })
+        else:
+            result["generated_text"] = dag_output["generated_text"]
 
         return result
 

@@ -9,6 +9,7 @@ Extensibility:
   - Each config specifies the HF dataset name, split, and field mappings.
 """
 
+import torch
 from torch.utils.data import Dataset
 
 
@@ -106,6 +107,37 @@ TASK_CONFIGS = {
     },
 }
 
+def build_labels(
+    question_len: int,
+    answer_ids: torch.LongTensor,
+    ignore_index: int = -100,
+) -> torch.LongTensor:
+    """Construct labels aligned with [question ; answer] logits.
+
+    Terminal agent's forward_for_loss returns logits for [question ; answer].
+    We want loss only on answer positions:
+      labels = [-100, -100, ..., -100, answer_token_0, answer_token_1, ...]
+               |---- question_len ----||---------- answer_len ----------|
+
+    Args:
+        question_len: number of question tokens
+        answer_ids: [B, answer_len] ground truth answer tokens
+        ignore_index: mask value for non-supervised positions
+
+    Returns:
+        labels: [B, question_len + answer_len]
+    """
+    B, answer_len = answer_ids.shape
+    total_len = question_len + answer_len
+
+    labels = torch.full(
+        (B, total_len), ignore_index,
+        dtype=answer_ids.dtype, device=answer_ids.device,
+    )
+    # Place answer tokens after question positions
+    labels[:, question_len:] = answer_ids
+
+    return labels
 
 def create_dataset(task: str, split: str = "train", max_samples: int | None = None) -> MultiAgentDataset:
     """Factory function to create a dataset.

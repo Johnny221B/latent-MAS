@@ -10,7 +10,6 @@ import argparse
 import sys
 from pathlib import Path
 
-# Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -24,7 +23,6 @@ from data.dataset import create_dataset
 
 
 def collate_fn(batch: list[dict]) -> dict:
-    """Simple collate: just group questions and answers."""
     return {
         "questions": [item["question"] for item in batch],
         "answers": [item["answer"] for item in batch],
@@ -32,8 +30,6 @@ def collate_fn(batch: list[dict]) -> dict:
 
 
 def train(config_path: str, max_samples: int | None = None):
-    """Main training loop."""
-    # ── Load config ──
     config = load_config(config_path)
     training_cfg = config["training"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -44,7 +40,6 @@ def train(config_path: str, max_samples: int | None = None):
     system = MultiAgentSystem(config)
     system.to(device)
 
-    # Log architecture info
     total_params = sum(p.numel() for p in system.parameters())
     trainable_params = sum(p.numel() for p in system.get_trainable_params())
     print(f"Total parameters: {total_params:,}")
@@ -68,7 +63,7 @@ def train(config_path: str, max_samples: int | None = None):
     )
     print(f"Dataset size: {len(dataset)}, Batches: {len(dataloader)}")
 
-    # ── Optimizer (only trainable params) ──
+    # ── Optimizer ──
     optimizer = AdamW(
         system.get_trainable_params(),
         lr=training_cfg["lr"],
@@ -88,7 +83,7 @@ def train(config_path: str, max_samples: int | None = None):
         epoch_loss = 0.0
 
         for batch_idx, batch in enumerate(dataloader):
-            # Tokenize
+            # ── Tokenize question ──
             tokenized = system.base_model.tokenize(
                 batch["questions"],
                 max_length=training_cfg.get("max_seq_len", 512),
@@ -96,18 +91,23 @@ def train(config_path: str, max_samples: int | None = None):
             task_token_ids = tokenized["input_ids"].to(device)
             task_attention_mask = tokenized["attention_mask"].to(device)
 
-            # Tokenize answers as labels
-            label_tokenized = system.base_model.tokenize(
+            # ── Tokenize answer ──
+            answer_tokenized = system.base_model.tokenize(
                 batch["answers"],
                 max_length=128,
             )
-            labels = label_tokenized["input_ids"].to(device)
+            answer_ids = answer_tokenized["input_ids"].to(device)
+            answer_mask = answer_tokenized["attention_mask"].to(device)
 
-            # Forward
+            # ── Forward (teacher forcing) ──
+            # Non-terminal agents: latent reasoning → compress → prefix
+            # Terminal agent sees: [prefix; role; question; answer]
+            # Loss computed only on answer positions
             output = system(
                 task_token_ids=task_token_ids,
                 task_attention_mask=task_attention_mask,
-                labels=labels,
+                answer_ids=answer_ids,
+                answer_mask=answer_mask,
             )
 
             loss = output["loss"] / grad_accum_steps
@@ -121,7 +121,7 @@ def train(config_path: str, max_samples: int | None = None):
 
             epoch_loss += output["loss"].item()
 
-            # Logging
+            # ── Logging ──
             if (batch_idx + 1) % log_interval == 0:
                 avg_loss = epoch_loss / (batch_idx + 1)
                 print(
@@ -133,7 +133,7 @@ def train(config_path: str, max_samples: int | None = None):
                     f"Graph: {output['graph_loss'].item():.4f}"
                 )
 
-            # Save checkpoint
+            # ── Save checkpoint ──
             if global_step > 0 and global_step % save_interval == 0:
                 ckpt_path = output_dir / f"checkpoint_step{global_step}.pt"
                 torch.save({
@@ -144,14 +144,14 @@ def train(config_path: str, max_samples: int | None = None):
                 }, ckpt_path)
                 print(f"Saved checkpoint: {ckpt_path}")
 
-        # End of epoch
+        # ── End of epoch ──
         avg_loss = epoch_loss / len(dataloader)
         print(f"\n{'='*60}")
         print(f"Epoch {epoch+1} complete | Avg Loss: {avg_loss:.4f}")
         print(system.log_adjacency())
         print(f"{'='*60}\n")
 
-    # Final save
+    # ── Final save ──
     final_path = output_dir / "final_model.pt"
     torch.save({
         "step": global_step,

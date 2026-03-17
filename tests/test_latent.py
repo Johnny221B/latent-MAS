@@ -114,12 +114,19 @@ def run_test(model_path: str):
     print(f"\n  final_logits shape: {final_logits.shape}")
 
     # Create labels (tokenize the answer)
-    label_tokenized = base_model.tokenize([GROUND_TRUTH], max_length=32)
-    labels = label_tokenized["input_ids"].to(device)
-    print(f"  labels shape: {labels.shape}")
+    from data.dataset import build_labels
 
-    # Compute losses
-    task_loss = task_loss_fn(final_logits, labels, mode="reward")
+    label_tokenized = base_model.tokenize([GROUND_TRUTH], max_length=32)
+    answer_ids = label_tokenized["input_ids"].to(device)
+
+    labels = build_labels(
+        task_token_ids=task_ids,
+        answer_token_ids=answer_ids,
+    )
+    print(f"  labels shape: {labels.shape} (answer_len={answer_ids.shape[1]}, task_len={task_ids.shape[1]})")
+    print(f"  supervised positions: {(labels != -100).sum().item()}")
+
+    task_loss = task_loss_fn(final_logits, labels)
     graph_loss_dict = graph_loss_fn(A, adjacency.prior)
     total_loss = task_loss + graph_loss_dict["loss"]
 

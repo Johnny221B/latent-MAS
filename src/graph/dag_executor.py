@@ -25,6 +25,8 @@ class DAGExecutor:
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         training: bool = True,
+        answer_ids: torch.LongTensor | None = None,
+        answer_mask: torch.Tensor | None = None,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -78,6 +80,8 @@ class DAGExecutor:
                         task_token_ids=task_token_ids,
                         task_attention_mask=task_attention_mask,
                         upstream_prefix=upstream_prefix,
+                        answer_ids=answer_ids,
+                        answer_mask=answer_mask,
                     )
                 else:
                     # Inference: autoregressive generation, return text
@@ -88,8 +92,10 @@ class DAGExecutor:
                     )
 
         if training:
-            return {
+             return {
                 "final_logits": terminal_output["logits"],
+                "question_len": terminal_output["question_len"],
+                "answer_len": terminal_output["answer_len"],
                 "all_prefixes": all_prefixes,
             }
         else:

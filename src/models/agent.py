@@ -140,25 +140,44 @@ class Agent:
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
+        answer_ids: torch.LongTensor | None = None,
+        answer_mask: torch.Tensor | None = None,
     ) -> dict:
-        """Forward pass for terminal agent — returns logits for CE loss.
+        """Forward pass for terminal agent with teacher forcing.
 
-        Unlike reason(), this does NOT generate tokens. It runs a single
-        forward pass and returns text-aligned logits for loss computation.
+        Input to model: [prefix ; role_prompt ; question ; answer]
+        Logits returned: aligned with [question ; answer] (role sliced off)
+        Labels should mask question positions with -100, keep answer positions.
+
+        Args:
+            task_token_ids: [B, question_len]
+            task_attention_mask: [B, question_len]
+            upstream_prefix: [B, Lp, D] or None
+            answer_ids: [B, answer_len] ground truth answer tokens
+            answer_mask: [B, answer_len] attention mask for answer
         """
-        input_ids = self.build_input_ids(task_token_ids)
+        # Build: [role_prompt ; question ; answer]
+        role_ids = self._get_role_token_ids().expand(task_token_ids.shape[0], -1)
+        
+        if answer_ids is not None:
+            input_ids = torch.cat([role_ids, task_token_ids, answer_ids], dim=1)
+        else:
+            input_ids = torch.cat([role_ids, task_token_ids], dim=1)
+
+        # Build attention mask
+        B = task_token_ids.shape[0]
+        role_len = role_ids.shape[1]
+        role_mask_part = torch.ones(B, role_len, device=task_token_ids.device, dtype=torch.long)
 
         if task_attention_mask is not None:
-            role_mask = torch.ones(
-                task_attention_mask.shape[0],
-                self._get_role_token_ids().shape[1],
-                device=task_attention_mask.device,
-                dtype=task_attention_mask.dtype,
-            )
-            attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
+            if answer_ids is not None and answer_mask is not None:
+                attention_mask = torch.cat([role_mask_part, task_attention_mask, answer_mask], dim=1)
+            else:
+                attention_mask = torch.cat([role_mask_part, task_attention_mask], dim=1)
         else:
             attention_mask = None
 
+        # Forward through frozen model
         outputs = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -166,10 +185,13 @@ class Agent:
             output_hidden_states=True,
         )
 
-        role_len = self._get_role_token_ids().shape[1]
+        # Slice off role_prompt positions, keep [question ; answer]
+        logits = outputs["logits"][:, role_len:, :]
 
         return {
-            "logits": outputs["logits"][:, role_len:, :],  # task-only logits
+            "logits": logits,                # [B, question_len + answer_len, V]
+            "question_len": task_token_ids.shape[1],
+            "answer_len": answer_ids.shape[1] if answer_ids is not None else 0,
         }
         
     @torch.no_grad()
