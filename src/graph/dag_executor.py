@@ -1,18 +1,4 @@
-"""
-DAGExecutor: orchestrates agent execution in topological order.
-
-Responsibilities:
-  - Determine execution order (topological sort of the DAG)
-  - For each agent: aggregate upstream prefixes, run reasoning, compress output
-  - Return the final agent's output for loss computation
-
-Since we enforce topological_order = agent_index (via upper-triangular adjacency),
-the execution order is simply [0, 1, ..., n-1].
-
-Extensibility:
-  - Multi-round: wrap execute() in a loop with convergence check.
-  - Dynamic DAG: recompute topological order if the graph structure changes.
-"""
+# src/graph/dag_executor.py
 
 import torch
 
@@ -38,6 +24,7 @@ class DAGExecutor:
         compressor: LatentCompressor,
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
+        training: bool = True,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -70,44 +57,43 @@ class DAGExecutor:
                 all_prefixes=all_prefixes,
             )
 
-            # ── Step 2: Agent reasoning ──
-            agent_output = agents[j].reason(
-                task_token_ids=task_token_ids,
-                task_attention_mask=task_attention_mask,
-                upstream_prefix=upstream_prefix,
-            )
-            S_j = agent_output["hidden_trajectory"]  # [B, m, D]
-            mask_j = agent_output["compressor_mask"]
-            # all_hidden.append(S_j)
-
-            # ── Step 3: Compress for downstream agents ──
-            # if j < n - 1:
-            #     P_j = compressor(S_j, mask_j)  # [B, Lp, D]
-            #     all_prefixes.append(P_j)
-            # else:
-            #     all_prefixes.append(None)
-            #     # Terminal agent: capture text-only logits for loss
-            #     final_logits = agent_output["logits"]  # [B, text_len, V]
             if j < n - 1:
-                # Non-terminal: generation → compress → pass downstream
-                P_j = compressor(S_j, mask=mask_j)
-                all_prefixes.append(P_j)
-            else:
-                # Terminal: forward pass to get logits for CE loss
-                all_prefixes.append(None)
-                terminal_output = agents[j].forward_for_loss(
+                # ── Non-terminal: latent reasoning → compress → pass downstream ──
+                agent_output = agents[j].reason(
                     task_token_ids=task_token_ids,
                     task_attention_mask=task_attention_mask,
                     upstream_prefix=upstream_prefix,
                 )
+                S_j = agent_output["hidden_trajectory"]
+                mask_j = agent_output["compressor_mask"]
+                P_j = compressor(S_j, mask=mask_j)
+                all_prefixes.append(P_j)
+            else:
+                # ── Terminal agent ──
+                all_prefixes.append(None)
 
-        # return {
-        #     "final_hidden": all_hidden[-1],
-        #     "final_logits": final_logits,
-        #     "all_hidden": all_hidden,
-        #     "all_prefixes": all_prefixes,
-        # }
-        return {
-            "final_logits": terminal_output["logits"],
-            "all_prefixes": all_prefixes,
-        }
+                if training:
+                    # Training: single forward pass, return logits for CE loss
+                    terminal_output = agents[j].forward_for_loss(
+                        task_token_ids=task_token_ids,
+                        task_attention_mask=task_attention_mask,
+                        upstream_prefix=upstream_prefix,
+                    )
+                else:
+                    # Inference: autoregressive generation, return text
+                    generated_text = agents[j].generate_answer(
+                        task_token_ids=task_token_ids,
+                        task_attention_mask=task_attention_mask,
+                        upstream_prefix=upstream_prefix,
+                    )
+
+        if training:
+            return {
+                "final_logits": terminal_output["logits"],
+                "all_prefixes": all_prefixes,
+            }
+        else:
+            return {
+                "generated_text": generated_text,
+                "all_prefixes": all_prefixes,
+            }

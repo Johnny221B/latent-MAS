@@ -17,6 +17,7 @@ Extensibility:
 """
 
 import os
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -310,6 +311,167 @@ class BaseModelWrapper(nn.Module):
                 "full_hidden": full_hidden,
                 "prefix_len": prefix_len,
             }
+            
+    def compute_alignment_matrix(self, lambda_reg: float = 1e-5) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute input-output alignment matrix W_a (LatentMAS Eq. 3).
+
+        W_a = (W_out^T W_out + λI)^{-1} W_out^T W_in
+
+        Also computes target_norm: the average norm of input embeddings,
+        used to rescale aligned vectors to match input embedding scale.
+
+        Computed ONCE and cached.
+
+        Returns:
+            (W_a, target_norm): alignment matrix [D, D] and scalar norm target
+        """
+        if hasattr(self, "_cached_alignment"):
+            return self._cached_alignment
+
+        W_in = self.model.get_input_embeddings().weight.detach().float()  # [V, D]
+        W_out = self.model.lm_head.weight.detach().float()                # [V, D]
+
+        gram = W_out.T @ W_out                                            # [D, D]
+        gram += lambda_reg * torch.eye(gram.shape[0], device=gram.device, dtype=gram.dtype)
+        rhs = W_out.T @ W_in                                             # [D, D]
+        W_a = torch.linalg.solve(gram, rhs)                              # [D, D]
+
+        target_norm = W_in.norm(dim=1).mean()
+
+        self._cached_alignment = (W_a, target_norm)
+        return W_a, target_norm
+
+    def apply_alignment(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Map last-layer hidden state back to input embedding space.
+
+        Steps:
+        1. h @ W_a  (project to input space)
+        2. Rescale to match average input embedding norm
+
+        Args:
+            hidden: [B, D] or [B, 1, D] last-layer hidden state
+
+        Returns:
+            aligned: same shape as input, in input embedding space
+        """
+        W_a, target_norm = self.compute_alignment_matrix()
+        W_a = W_a.to(device=hidden.device)
+        target_norm = target_norm.to(device=hidden.device)
+
+        h_float = hidden.float()
+        aligned = torch.matmul(h_float, W_a)
+
+        # Rescale to match input embedding norm
+        aligned_norm = aligned.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        aligned = aligned * (target_norm / aligned_norm)
+
+        return aligned.to(hidden.dtype)
+
+    def latent_reasoning(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.Tensor | None = None,
+        prefix_embeds: torch.Tensor | None = None,
+        num_latent_steps: int = 40,
+    ) -> dict:
+        """Auto-regressive latent reasoning (LatentMAS Section 3.1).
+
+        Each step:
+        1. Take last-layer hidden state h_t from previous step
+        2. Align: e_{t+1} = apply_alignment(h_t)
+        3. Feed e_{t+1} as inputs_embeds with KV cache
+        4. Get new h_{t+1}, repeat
+
+        No tokens are decoded. Reasoning is entirely in latent space.
+
+        Args:
+            input_ids: [B, seq_len]
+            attention_mask: [B, seq_len] or None
+            prefix_embeds: [B, Lp, D] from upstream agents, or None
+            num_latent_steps: m, number of latent reasoning steps
+
+        Returns:
+            dict with:
+                - hidden_trajectory: [B, m, D] the m latent thoughts
+                - prefix_len: int
+        """
+        B = input_ids.shape[0]
+        device = input_ids.device
+
+        # ── Step 1: Encode input (with optional prefix) ──
+        token_embeds = self.get_input_embeddings(input_ids)
+        prefix_len = 0
+
+        if prefix_embeds is not None:
+            prefix_embeds = prefix_embeds.to(dtype=token_embeds.dtype, device=device)
+            prefix_len = prefix_embeds.shape[1]
+            inputs_embeds = torch.cat([prefix_embeds, token_embeds], dim=1)
+            if attention_mask is not None:
+                prefix_mask = torch.ones(B, prefix_len, device=device, dtype=attention_mask.dtype)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+        else:
+            inputs_embeds = token_embeds
+
+        if attention_mask is None:
+            attention_mask = torch.ones(B, inputs_embeds.shape[1], device=device, dtype=torch.long)
+
+        # Initial forward: encode the full input, get KV cache
+        outputs = self.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            use_cache=True,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        raw = self._parse_model_output(outputs, output_hidden_states=True)
+        past_kv = raw["past_key_values"]
+        last_hidden = raw["hidden_states"][-1][:, -1, :]  # [B, D]
+
+        # ── Step 2: Latent reasoning loop ──
+        hidden_trajectory = []
+
+        for step in range(num_latent_steps):
+            # Align h_t to input embedding space
+            aligned = self.apply_alignment(last_hidden)     # [B, D]
+            latent_embed = aligned.unsqueeze(1)              # [B, 1, D]
+
+            # Build attention mask covering all past + new position
+            if past_kv is None:
+                past_len = 0
+            elif hasattr(past_kv, "get_seq_length"):
+                # HuggingFace DynamicCache
+                past_len = past_kv.get_seq_length()
+            else:
+                # Legacy tuple format
+                past_len = past_kv[0][0].shape[-2]
+            latent_mask = torch.ones(
+                B, past_len + 1,
+                dtype=torch.long,
+                device=device,
+            )
+
+            # Forward with KV cache (single latent token)
+            outputs = self.model(
+                inputs_embeds=latent_embed,
+                attention_mask=latent_mask,
+                past_key_values=past_kv,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            raw = self._parse_model_output(outputs, output_hidden_states=True)
+            past_kv = raw["past_key_values"]
+            last_hidden = raw["hidden_states"][-1][:, -1, :]  # [B, D]
+
+            hidden_trajectory.append(last_hidden.unsqueeze(1))  # [B, 1, D]
+
+        # Stack: [B, m, D]
+        hidden_trajectory = torch.cat(hidden_trajectory, dim=1)
+
+        return {
+            "hidden_trajectory": hidden_trajectory,
+            "prefix_len": prefix_len,
+        }
 
     def tokenize(self, texts: list[str], max_length: int = 512) -> dict:
         """Tokenize a batch of texts."""

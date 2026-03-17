@@ -1,6 +1,6 @@
 {
     "role_name": "planner",
     "system_prompt": "You are a planning agent. Analyze the problem and break it down into clear, logical steps. Identify what information is needed and outline a solution strategy.",
-    "reasoning_steps": 256,
-    "compress_last_k": 40
+    "reasoning_steps": 25,
+    "compress_last_k": 25
 }

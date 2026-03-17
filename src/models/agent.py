@@ -82,64 +82,58 @@ class Agent:
         return torch.cat([role_ids, task_token_ids], dim=1)
 
     def reason(
-        self,
-        task_token_ids: torch.LongTensor,
-        task_attention_mask: torch.Tensor | None = None,
-        upstream_prefix: torch.Tensor | None = None,
-    ) -> dict:
-        """Perform reasoning via auto-regressive generation and return hidden trajectory.
+            self,
+            task_token_ids: torch.LongTensor,
+            task_attention_mask: torch.Tensor | None = None,
+            upstream_prefix: torch.Tensor | None = None,
+        ) -> dict:
+            """Perform latent reasoning and return hidden trajectory.
 
-        The agent actually "thinks" by generating tokens. The hidden states
-        produced during generation form the reasoning trace S_i.
+            Each agent reasons in continuous latent space for m steps,
+            then returns the last k hidden states for compression.
 
-        Returns:
-            dict with:
-                - hidden_trajectory: [B, m, D] reasoning trace for compressor
-                - full_hidden: [B, input_len + m, D] complete hidden states
-                - logits: not available here (use generated_ids for eval)
-                - generated_ids: [B, m] generated tokens (for debugging)
-                - compressor_mask: [B, m] mask for hidden_trajectory (all 1s, no padding)
-        """
-        # Build input: [role_prompt; task]
-        input_ids = self.build_input_ids(task_token_ids)
+            Returns:
+                dict with:
+                    - hidden_trajectory: [B, k, D] last k latent thoughts for compressor
+                    - compressor_mask: [B, k] all ones (no padding in latent thoughts)
+                    - full_trajectory: [B, m, D] complete latent thoughts (for logging)
+                    - prefix_len: int
+            """
+            input_ids = self.build_input_ids(task_token_ids)
 
-        # Build attention mask
-        if task_attention_mask is not None:
-            role_mask = torch.ones(
-                task_attention_mask.shape[0],
-                self._get_role_token_ids().shape[1],
-                device=task_attention_mask.device,
-                dtype=task_attention_mask.dtype,
+            if task_attention_mask is not None:
+                role_mask = torch.ones(
+                    task_attention_mask.shape[0],
+                    self._get_role_token_ids().shape[1],
+                    device=task_attention_mask.device,
+                    dtype=task_attention_mask.dtype,
+                )
+                attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
+            else:
+                attention_mask = None
+
+            # Latent reasoning in continuous space
+            output = self.base_model.latent_reasoning(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                prefix_embeds=upstream_prefix,
+                num_latent_steps=self.reasoning_steps,
             )
-            attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
-        else:
-            attention_mask = None
 
-        # Generate with hidden state collection
-        gen_output = self.base_model.generate_with_hidden(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            prefix_embeds=upstream_prefix,
-            max_new_tokens=self.reasoning_steps,
-        )
+            trajectory = output["hidden_trajectory"]  # [B, m, D]
+            B, m, D = trajectory.shape
 
-        trajectory = gen_output["hidden_trajectory"]  # [B, m, D]
-        B, m, D = trajectory.shape
+            # Only compress the last k hidden states
+            k = min(self.compress_last_k, m)
+            trajectory_to_compress = trajectory[:, -k:, :]
+            compressor_mask = torch.ones(B, k, device=trajectory.device)
 
-        # Only compress the last k hidden states — these contain the most
-        # condensed reasoning since each position attends to all prior ones.
-        k = min(self.compress_last_k, m)  # handle case where generation < k
-        trajectory_to_compress = trajectory[:, -k:, :]  # [B, k, D]
-        compressor_mask = torch.ones(B, k, device=task_token_ids.device)
-
-        return {
-            "hidden_trajectory": trajectory_to_compress,  # [B, k, D] for compressor
-            "full_hidden": gen_output["full_hidden"],
-            "full_trajectory": trajectory,                 # [B, m, D] keep full for logging
-            "compressor_mask": compressor_mask,
-            "generated_ids": gen_output["generated_ids"],
-            "prefix_len": gen_output["prefix_len"],
-        }
+            return {
+                "hidden_trajectory": trajectory_to_compress,
+                "compressor_mask": compressor_mask,
+                "full_trajectory": trajectory,
+                "prefix_len": output["prefix_len"],
+            }
         
     def forward_for_loss(
         self,
@@ -177,6 +171,117 @@ class Agent:
         return {
             "logits": outputs["logits"][:, role_len:, :],  # task-only logits
         }
+        
+    @torch.no_grad()
+    def generate_answer(
+        self,
+        task_token_ids: torch.LongTensor,
+        task_attention_mask: torch.Tensor | None = None,
+        upstream_prefix: torch.Tensor | None = None,
+        max_new_tokens: int = 256,
+        temperature: float = 0.6,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+    ) -> str:
+        input_ids = self.build_input_ids(task_token_ids)  # [1, role_len + task_len]
+
+        if task_attention_mask is not None:
+            role_mask = torch.ones(
+                task_attention_mask.shape[0],
+                self._get_role_token_ids().shape[1],
+                device=task_attention_mask.device,
+                dtype=task_attention_mask.dtype,
+            )
+            attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
+        else:
+            attention_mask = None
+
+        # If we have upstream prefix, we need to:
+        # 1. Convert input_ids to embeddings
+        # 2. Prepend the prefix
+        # 3. Do a forward pass to get KV cache
+        # 4. Then generate from there
+        if upstream_prefix is not None:
+            token_embeds = self.base_model.get_input_embeddings(input_ids)
+            prefix = upstream_prefix.to(dtype=token_embeds.dtype, device=token_embeds.device)
+            inputs_embeds = torch.cat([prefix, token_embeds], dim=1)
+
+            if attention_mask is not None:
+                prefix_mask = torch.ones(
+                    attention_mask.shape[0],
+                    prefix.shape[1],
+                    device=attention_mask.device,
+                    dtype=attention_mask.dtype,
+                )
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+
+            # Forward pass to build KV cache from prefix + input
+            outputs = self.base_model.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=True,
+                return_dict=True,
+            )
+            past_kv = outputs.past_key_values if hasattr(outputs, 'past_key_values') else outputs[1]
+
+            # Now generate token by token using KV cache
+            generated_ids = []
+            raw = self.base_model._parse_model_output(outputs, output_hidden_states=False)
+            next_logits = raw["logits"][:, -1, :]  # [1, V]
+
+            for step in range(max_new_tokens):
+                if do_sample and temperature > 0:
+                    probs = torch.softmax(next_logits / temperature, dim=-1)
+                    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                    cumsum = torch.cumsum(sorted_probs, dim=-1)
+                    mask = cumsum - sorted_probs > top_p
+                    sorted_probs[mask] = 0.0
+                    sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
+                    next_token = sorted_indices.gather(1, torch.multinomial(sorted_probs, 1))
+                else:
+                    next_token = next_logits.argmax(dim=-1, keepdim=True)
+
+                generated_ids.append(next_token.item())
+
+                if next_token.item() == self.base_model.tokenizer.eos_token_id:
+                    break
+
+                # Forward next token with KV cache
+                next_embed = self.base_model.get_input_embeddings(next_token)
+
+                if hasattr(past_kv, "get_seq_length"):
+                    past_len = past_kv.get_seq_length()
+                else:
+                    past_len = past_kv[0][0].shape[-2]
+
+                step_mask = torch.ones(1, past_len + 1, dtype=torch.long, device=input_ids.device)
+                out = self.base_model.model(
+                    inputs_embeds=next_embed,
+                    attention_mask=step_mask,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                raw = self.base_model._parse_model_output(out, output_hidden_states=False)
+                past_kv = raw["past_key_values"]
+                next_logits = raw["logits"][:, -1, :]
+
+            return self.base_model.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        else:
+            # No prefix — just use model.generate directly
+            gen_out = self.base_model.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+                pad_token_id=self.base_model.tokenizer.pad_token_id,
+            )
+            return self.base_model.tokenizer.decode(
+                gen_out[0][input_ids.shape[1]:], skip_special_tokens=True
+            )
 
     def __repr__(self) -> str:
         return f"Agent(id={self.agent_id}, role={self.role_name})"
