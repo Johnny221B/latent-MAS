@@ -100,6 +100,48 @@ def test_dag_executor_returns_generation_metadata():
     assert out["generation"]["finish_reason"] == "eos"
 
 
+def test_dag_executor_passes_max_new_tokens_to_terminal_agent():
+    class FakeAgent:
+        def __init__(self):
+            self.seen_max_new_tokens = None
+
+        def reason(self, **kwargs):
+            return {
+                "hidden_trajectory": torch.zeros(1, 1, 4),
+                "compressor_mask": torch.ones(1, 1),
+            }
+
+        def generate_answer(self, **kwargs):
+            self.seen_max_new_tokens = kwargs["max_new_tokens"]
+            return {
+                "generated_text": "42",
+                "finish_reason": "max_new_tokens",
+                "generated_token_count": kwargs["max_new_tokens"],
+                "stopped_early": False,
+            }
+
+    class FakeCompressor:
+        def __call__(self, hidden, mask=None):
+            return hidden
+
+    first = FakeAgent()
+    terminal = FakeAgent()
+    executor = DAGExecutor(aggregator=MessageAggregator())
+    adjacency = torch.zeros(2, 2)
+
+    out = executor.execute(
+        agents=[first, terminal],
+        adjacency=adjacency,
+        compressor=FakeCompressor(),
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        training=False,
+        max_new_tokens=2048,
+    )
+
+    assert terminal.seen_max_new_tokens == 2048
+    assert out["generation"]["generated_token_count"] == 2048
+
+
 if __name__ == "__main__":
     test_aggregator_no_upstream()
     test_aggregator_weighted_sum()

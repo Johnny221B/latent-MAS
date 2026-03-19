@@ -217,6 +217,7 @@ def evaluate(
             output = system(
                 task_token_ids=task_ids,
                 task_attention_mask=task_mask,
+                max_new_tokens=generation_max_new_tokens,
             )
 
             generated_text = output["generated_text"]

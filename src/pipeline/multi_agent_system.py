@@ -120,6 +120,7 @@ class MultiAgentSystem(nn.Module):
         task_attention_mask: torch.Tensor | None = None,
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
+        max_new_tokens: int = 256,
     ) -> dict:
         """Full forward pass.
 
@@ -144,6 +145,7 @@ class MultiAgentSystem(nn.Module):
             training=is_training,
             answer_ids=answer_ids,
             answer_mask=answer_mask,
+            max_new_tokens=max_new_tokens,
         )
 
         result = {"adjacency": A}

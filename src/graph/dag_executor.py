@@ -27,6 +27,7 @@ class DAGExecutor:
         training: bool = True,
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
+        max_new_tokens: int = 256,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -89,6 +90,7 @@ class DAGExecutor:
                         task_token_ids=task_token_ids,
                         task_attention_mask=task_attention_mask,
                         upstream_prefix=upstream_prefix,
+                        max_new_tokens=max_new_tokens,
                         return_metadata=True,
                     )
 
