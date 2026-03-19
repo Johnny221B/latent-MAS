@@ -59,7 +59,7 @@ class MultiAgentSystem(nn.Module):
         # ── Load base model (frozen, shared) ──
         self.base_model = BaseModelWrapper(
             model_name=config["model"]["name"],
-            cache_dir=config["model"].get("cache_dir", "./weights"),
+            cache_dir=config["model"].get("cache_dir"),
         )
         hidden_dim = self.base_model.hidden_dim
 
@@ -175,6 +175,7 @@ class MultiAgentSystem(nn.Module):
             })
         else:
             result["generated_text"] = dag_output["generated_text"]
+            result["generation"] = dag_output["generation"]
 
         return result
 

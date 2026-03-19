@@ -20,7 +20,7 @@ for RANK in $(seq 0 $((NUM_GPUS-1))); do
     WORLD_SIZE=$NUM_GPUS \
     MASTER_ADDR=localhost \
     MASTER_PORT=$MASTER_PORT \
-    python scripts/multi_train.py --config $CONFIG $MAX_SAMPLES_ARG &
+    uv run --python .venv/bin/python src/cli/multi_train.py --config $CONFIG $MAX_SAMPLES_ARG &
     echo "  Started rank $RANK on GPU $RANK"
 done
 

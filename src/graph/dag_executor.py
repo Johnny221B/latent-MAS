@@ -85,10 +85,11 @@ class DAGExecutor:
                     )
                 else:
                     # Inference: autoregressive generation, return text
-                    generated_text = agents[j].generate_answer(
+                    generation = agents[j].generate_answer(
                         task_token_ids=task_token_ids,
                         task_attention_mask=task_attention_mask,
                         upstream_prefix=upstream_prefix,
+                        return_metadata=True,
                     )
 
         if training:
@@ -100,6 +101,7 @@ class DAGExecutor:
             }
         else:
             return {
-                "generated_text": generated_text,
+                "generated_text": generation["generated_text"],
+                "generation": generation,
                 "all_prefixes": all_prefixes,
             }

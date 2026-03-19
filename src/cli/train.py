@@ -2,15 +2,15 @@
 Training entry point for the multi-agent latent communication system.
 
 Usage:
-    python scripts/train.py --config configs/experiments/gsm8k_3agent.yaml
-    python scripts/train.py --config configs/experiments/gsm8k_3agent.yaml --max_samples 100
+    python src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml
+    python src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml --max_samples 100
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent
+project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 import torch
@@ -18,6 +18,8 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
 from src.utils.config import load_config
+from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
+from src.utils.training import validate_min_samples_for_batches
 from src.pipeline.multi_agent_system import MultiAgentSystem
 from data.dataset import create_dataset
 
@@ -54,6 +56,12 @@ def train(config_path: str, max_samples: int | None = None):
         split="train",
         max_samples=max_samples,
     )
+    validate_min_samples_for_batches(
+        dataset_size=len(dataset),
+        per_gpu_batch_size=training_cfg["batch_size"],
+        world_size=1,
+        drop_last=True,
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=training_cfg["batch_size"],
@@ -76,6 +84,7 @@ def train(config_path: str, max_samples: int | None = None):
     save_interval = training_cfg.get("save_interval", 500)
     output_dir = Path(config.get("output", {}).get("dir", "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = init_wandb_run(config=config, output_dir=output_dir, rank=0)
 
     global_step = 0
     for epoch in range(training_cfg["epochs"]):
@@ -143,6 +152,22 @@ def train(config_path: str, max_samples: int | None = None):
                     f"Comp∇: {comp_grad_norm:.6f} | "
                     f"Adj∇: {adj_grad_norm:.6f}"
                 )
+                log_wandb(
+                    wandb_run,
+                    {
+                        "train/loss": output["loss"].item(),
+                        "train/task_loss": output["task_loss"].item(),
+                        "train/graph_loss": output["graph_loss"].item(),
+                        "train/graph_loss_add": output["graph_loss_add"].item(),
+                        "train/graph_loss_drop": output["graph_loss_drop"].item(),
+                        "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
+                        "train/comp_grad": float(comp_grad_norm),
+                        "train/adj_grad": float(adj_grad_norm),
+                        "train/epoch": epoch + 1,
+                        "train/batch": batch_idx + 1,
+                    },
+                    step=global_step,
+                )
 
             # ── Save checkpoint ──
             if global_step > 0 and global_step % save_interval == 0:
@@ -161,6 +186,17 @@ def train(config_path: str, max_samples: int | None = None):
         print(f"Epoch {epoch+1} complete | Avg Loss: {avg_loss:.4f}")
         print(system.log_adjacency())
         print(f"{'='*60}\n")
+        A = system.adjacency.get_adjacency().detach()
+        log_wandb(
+            wandb_run,
+            {
+                "epoch/avg_loss": avg_loss,
+                "epoch/adjacency_min": A.min().item(),
+                "epoch/adjacency_max": A.max().item(),
+                "epoch/index": epoch + 1,
+            },
+            step=global_step,
+        )
 
     # ── Final save ──
     final_path = output_dir / "final_model.pt"
@@ -171,6 +207,15 @@ def train(config_path: str, max_samples: int | None = None):
         "config": config,
     }, final_path)
     print(f"Training complete. Final model saved to {final_path}")
+    log_wandb(
+        wandb_run,
+        {
+            "final/global_step": global_step,
+            "final/output_dir": str(output_dir),
+        },
+        step=global_step,
+    )
+    finish_wandb(wandb_run)
 
 
 if __name__ == "__main__":

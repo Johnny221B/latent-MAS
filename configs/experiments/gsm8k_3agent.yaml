@@ -1,6 +1,5 @@
 model:
-  name: "Qwen/Qwen3-0.6B"
-  cache_dir: "/data2/yangyz/latent-MAS/weights/Qwen__Qwen3-0.6B"
+  name: "Qwen/Qwen3-8B"
   frozen: true
 
 graph:
@@ -14,16 +13,16 @@ compressor:
 
 training:
   task: "gsm8k"
-  batch_size: 8
+  batch_size: 32
   lr: 0.0005
   weight_decay: 0.01
-  epochs: 50
+  epochs: 1
   max_seq_len: 256
   lambda_add: 0.1       # penalty for adding edges not in prior
   lambda_drop: 0.005      # penalty for dropping edges in prior
   lambda_sparse: 0.005    # penalty for sparsity of edges
   gradient_accumulation_steps: 1
-  log_interval: 50
+  log_interval: 10
   save_interval: 1000
 
 reasoning:
@@ -31,5 +30,12 @@ reasoning:
   compress_last_k: 25       # only compress last k hidden states
 
 output:
-  dir: "outputs/gsm8k_qwen3-0.6b"
+  dir: "outputs/gsm8k_qwen3-8b"
   log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

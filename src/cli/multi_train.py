@@ -2,13 +2,13 @@
 Training entry point with proper multi-GPU DDP support.
 
 Single GPU:
-    CUDA_VISIBLE_DEVICES=0 python scripts/train.py --config configs/experiments/gsm8k_3agent.yaml
+    CUDA_VISIBLE_DEVICES=0 python src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml
 
 Multi-GPU (8 cards):
-    torchrun --nproc_per_node=8 scripts/train.py --config configs/experiments/gsm8k_3agent.yaml
+    torchrun --nproc_per_node=8 src/cli/multi_train.py --config configs/experiments/gsm8k_3agent.yaml
 
 Specific GPUs:
-    CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 scripts/train.py --config configs/experiments/gsm8k_3agent.yaml
+    CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 src/cli/multi_train.py --config configs/experiments/gsm8k_3agent.yaml
 """
 
 import argparse
@@ -19,7 +19,7 @@ from pathlib import Path
 import csv
 from datetime import datetime
 
-project_root = Path(__file__).parent.parent
+project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 import torch
@@ -28,6 +28,8 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim import AdamW
 
 from src.utils.config import load_config
+from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
+from src.utils.training import validate_min_samples_for_batches
 from src.pipeline.multi_agent_system import MultiAgentSystem
 from data.dataset import create_dataset
 
@@ -121,6 +123,12 @@ def train(config_path: str, max_samples: int | None = None):
         split="train",
         max_samples=max_samples,
     )
+    validate_min_samples_for_batches(
+        dataset_size=len(dataset),
+        per_gpu_batch_size=training_cfg["batch_size"],
+        world_size=world_size,
+        drop_last=True,
+    )
 
     # DistributedSampler splits data across GPUs
     sampler = DistributedSampler(dataset, shuffle=True) if is_ddp else None
@@ -168,6 +176,8 @@ def train(config_path: str, max_samples: int | None = None):
         with open(output_dir / "config.yaml", "w") as f:
             yaml.dump(config, f, default_flow_style=False)
         print(f"  Output dir: {output_dir}")
+
+    wandb_run = init_wandb_run(config=config, output_dir=output_dir, rank=rank)
 
     # ── Loss log ──
     loss_log = []  # list of dicts, saved to CSV
@@ -251,6 +261,26 @@ def train(config_path: str, max_samples: int | None = None):
                     f"tok:{t1-t0:.1f}s fwd:{t2-t1:.1f}s bwd:{t3-t2:.1f}s | "
                     f"mem:{mem:.1f}GB"
                 )
+                log_wandb(
+                    wandb_run,
+                    {
+                        "train/loss": output["loss"].item(),
+                        "train/task_loss": output["task_loss"].item(),
+                        "train/graph_loss": output["graph_loss"].item(),
+                        "train/graph_loss_add": output["graph_loss_add"].item(),
+                        "train/graph_loss_drop": output["graph_loss_drop"].item(),
+                        "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
+                        "train/comp_grad": comp_grad,
+                        "train/adj_grad": adj_grad,
+                        "train/forward_seconds": t2 - t1,
+                        "train/backward_seconds": t3 - t2,
+                        "train/tokenize_seconds": t1 - t0,
+                        "train/max_memory_gb": mem,
+                        "train/epoch": epoch + 1,
+                        "train/batch": batch_idx + 1,
+                    },
+                    step=global_step,
+                )
                 
                         # ── Record loss ──
             if is_main_process():
@@ -285,6 +315,16 @@ def train(config_path: str, max_samples: int | None = None):
             A = adjacency.get_adjacency().detach()
             print(f"Adjacency range: [{A.min().item():.4f}, {A.max().item():.4f}]")
             print(f"{'='*60}\n")
+            log_wandb(
+                wandb_run,
+                {
+                    "epoch/avg_loss": avg_loss,
+                    "epoch/adjacency_min": A.min().item(),
+                    "epoch/adjacency_max": A.max().item(),
+                    "epoch/index": epoch + 1,
+                },
+                step=global_step,
+            )
             
             csv_path = output_dir / "loss_log.csv"
             with open(csv_path, "w", newline="") as f:
@@ -302,6 +342,15 @@ def train(config_path: str, max_samples: int | None = None):
             "config": config,
         }, final_path)
         print(f"Training complete. Final model saved to {final_path}")
+        log_wandb(
+            wandb_run,
+            {
+                "final/global_step": global_step,
+                "final/output_dir": str(output_dir),
+            },
+            step=global_step,
+        )
+    finish_wandb(wandb_run)
 
     cleanup_distributed()
 

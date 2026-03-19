@@ -11,6 +11,8 @@ __pycache__/
 dist/
 build/
 *.egg
+.python-version
+.pytest_cache/
 
 # ── Virtual environments ──
 .venv/
@@ -41,3 +43,6 @@ wandb/
 
 # ── Data cache ──
 .cache/
+
+.env
+LatentMAS/

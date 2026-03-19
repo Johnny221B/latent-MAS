@@ -27,23 +27,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 class BaseModelWrapper(nn.Module):
     """Wrapper around a frozen HuggingFace causal language model."""
 
-    def __init__(self, model_name: str, cache_dir: str = "./weights"):
+    def __init__(self, model_name: str, cache_dir: str | None = None):
         super().__init__()
 
         # ── Load model & tokenizer ──
         load_path, load_kwargs = self._resolve_model_path(model_name, cache_dir)
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            load_path,
-            torch_dtype=torch.float32,
-            trust_remote_code=True,
-            **load_kwargs,
-        )
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            load_path,
-            trust_remote_code=True,
-            **load_kwargs,
-        )
+        self.model = self._load_hf_model(load_path, load_kwargs)
+        self.tokenizer = self._load_hf_tokenizer(load_path, load_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -55,13 +45,51 @@ class BaseModelWrapper(nn.Module):
         self.model_config = self.model.config
 
     @staticmethod
-    def _resolve_model_path(model_name: str, cache_dir: str) -> tuple[str, dict]:
+    def _resolve_model_path(model_name: str, cache_dir: str | None) -> tuple[str, dict]:
         """Determine whether to load from a local directory or HF hub."""
-        if os.path.isfile(os.path.join(cache_dir, "config.json")):
+        if cache_dir and os.path.isfile(os.path.join(cache_dir, "config.json")):
             return cache_dir, {}
         if os.path.isabs(model_name) and os.path.isfile(os.path.join(model_name, "config.json")):
             return model_name, {}
-        return model_name, {"cache_dir": cache_dir}
+        if cache_dir:
+            return model_name, {"cache_dir": cache_dir}
+        return model_name, {}
+
+    @staticmethod
+    def _load_hf_model(load_path: str, load_kwargs: dict):
+        try:
+            return AutoModelForCausalLM.from_pretrained(
+                load_path,
+                torch_dtype=torch.float32,
+                trust_remote_code=True,
+                **load_kwargs,
+            )
+        except Exception:
+            offline_kwargs = dict(load_kwargs)
+            offline_kwargs["local_files_only"] = True
+            return AutoModelForCausalLM.from_pretrained(
+                load_path,
+                torch_dtype=torch.float32,
+                trust_remote_code=True,
+                **offline_kwargs,
+            )
+
+    @staticmethod
+    def _load_hf_tokenizer(load_path: str, load_kwargs: dict):
+        try:
+            return AutoTokenizer.from_pretrained(
+                load_path,
+                trust_remote_code=True,
+                **load_kwargs,
+            )
+        except Exception:
+            offline_kwargs = dict(load_kwargs)
+            offline_kwargs["local_files_only"] = True
+            return AutoTokenizer.from_pretrained(
+                load_path,
+                trust_remote_code=True,
+                **offline_kwargs,
+            )
 
     def _freeze(self):
         """Freeze all model parameters and lock to eval mode.

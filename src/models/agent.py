@@ -81,6 +81,18 @@ class Agent:
         role_ids = self._get_role_token_ids().expand(B, -1)  # [B, role_len]
         return torch.cat([role_ids, task_token_ids], dim=1)
 
+    @staticmethod
+    def _infer_finish_reason(
+        generated_ids: list[int],
+        eos_token_id: int | None,
+        max_new_tokens: int,
+    ) -> str:
+        if generated_ids and eos_token_id is not None and generated_ids[-1] == eos_token_id:
+            return "eos"
+        if len(generated_ids) >= max_new_tokens:
+            return "max_new_tokens"
+        return "stopped_early"
+
     def reason(
             self,
             task_token_ids: torch.LongTensor,
@@ -209,8 +221,10 @@ class Agent:
         temperature: float = 0.6,
         top_p: float = 0.95,
         do_sample: bool = True,
-    ) -> str:
+        return_metadata: bool = False,
+    ) -> str | dict:
         input_ids = self.build_input_ids(task_token_ids)  # [1, role_len + task_len]
+        eos_token_id = self.base_model.tokenizer.eos_token_id
 
         if task_attention_mask is not None:
             role_mask = torch.ones(
@@ -255,6 +269,7 @@ class Agent:
             generated_ids = []
             raw = self.base_model._parse_model_output(outputs, output_hidden_states=False)
             next_logits = raw["logits"][:, -1, :]  # [1, V]
+            finish_reason = "max_new_tokens"
 
             for step in range(max_new_tokens):
                 if do_sample and temperature > 0:
@@ -270,7 +285,8 @@ class Agent:
 
                 generated_ids.append(next_token.item())
 
-                if next_token.item() == self.base_model.tokenizer.eos_token_id:
+                if next_token.item() == eos_token_id:
+                    finish_reason = "eos"
                     break
 
                 # Forward next token with KV cache
@@ -293,7 +309,15 @@ class Agent:
                 past_kv = raw["past_key_values"]
                 next_logits = raw["logits"][:, -1, :]
 
-            return self.base_model.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            generated_text = self.base_model.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            if return_metadata:
+                return {
+                    "generated_text": generated_text,
+                    "finish_reason": finish_reason,
+                    "generated_token_count": len(generated_ids),
+                    "stopped_early": finish_reason != "max_new_tokens",
+                }
+            return generated_text
 
         else:
             # No prefix — just use model.generate directly
@@ -305,10 +329,26 @@ class Agent:
                 top_p=top_p,
                 do_sample=do_sample,
                 pad_token_id=self.base_model.tokenizer.pad_token_id,
+                return_dict_in_generate=True,
             )
-            return self.base_model.tokenizer.decode(
-                gen_out[0][input_ids.shape[1]:], skip_special_tokens=True
+            sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
+            generated_token_ids = sequences[0][input_ids.shape[1]:].tolist()
+            generated_text = self.base_model.tokenizer.decode(
+                generated_token_ids, skip_special_tokens=True
             )
+            finish_reason = self._infer_finish_reason(
+                generated_ids=generated_token_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=max_new_tokens,
+            )
+            if return_metadata:
+                return {
+                    "generated_text": generated_text,
+                    "finish_reason": finish_reason,
+                    "generated_token_count": len(generated_token_ids),
+                    "stopped_early": finish_reason != "max_new_tokens",
+                }
+            return generated_text
 
     def __repr__(self) -> str:
         return f"Agent(id={self.agent_id}, role={self.role_name})"

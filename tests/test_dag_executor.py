@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.communication.aggregator import MessageAggregator
+from src.graph.dag_executor import DAGExecutor
 
 
 def test_aggregator_no_upstream():
@@ -63,6 +64,40 @@ def test_aggregator_gradient_through_weights():
     assert adjacency.grad is not None, "Adjacency should receive gradients"
     assert adjacency.grad[0, 1].item() != 0, "Edge weight gradient should be non-zero"
     print("✓ test_aggregator_gradient_through_weights passed")
+
+
+def test_dag_executor_returns_generation_metadata():
+    class FakeAgent:
+        def reason(self, **kwargs):
+            return {
+                "hidden_trajectory": torch.zeros(1, 1, 4),
+                "compressor_mask": torch.ones(1, 1),
+            }
+
+        def generate_answer(self, **kwargs):
+            assert kwargs["return_metadata"] is True
+            return {
+                "generated_text": "42",
+                "finish_reason": "eos",
+                "generated_token_count": 3,
+                "stopped_early": True,
+            }
+
+    class FakeCompressor:
+        def __call__(self, hidden, mask=None):
+            return hidden
+
+    executor = DAGExecutor(aggregator=MessageAggregator())
+    adjacency = torch.zeros(2, 2)
+    out = executor.execute(
+        agents=[FakeAgent(), FakeAgent()],
+        adjacency=adjacency,
+        compressor=FakeCompressor(),
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        training=False,
+    )
+    assert out["generated_text"] == "42"
+    assert out["generation"]["finish_reason"] == "eos"
 
 
 if __name__ == "__main__":
