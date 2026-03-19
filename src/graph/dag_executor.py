@@ -31,6 +31,7 @@ class DAGExecutor:
         inference_mode: str = "legacy_plain_with_prefix",
         use_terminal_prefix: bool = True,
         do_sample: bool = True,
+        collect_agent_logs: bool = False,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -51,9 +52,20 @@ class DAGExecutor:
         n = len(agents)
         B = task_token_ids.shape[0]
 
-        all_hidden = []      # full S_i for each agent (for compressor)
         all_prefixes = []    # compressed P_i for each agent
-        final_logits = None  # text-only logits from terminal agent
+        agent_logs = []
+
+        def summarize_tensor(name: str, value: torch.Tensor | None) -> dict | None:
+            if value is None:
+                return None
+            detached = value.detach().float()
+            return {
+                "name": name,
+                "shape": list(detached.shape),
+                "norm": float(detached.norm().item()),
+                "mean": float(detached.mean().item()),
+                "std": float(detached.std(unbiased=False).item()),
+            }
 
         for j in range(n):
             # ── Step 1: Aggregate upstream prefixes ──
@@ -74,6 +86,19 @@ class DAGExecutor:
                 mask_j = agent_output["compressor_mask"]
                 P_j = compressor(S_j, mask=mask_j)
                 all_prefixes.append(P_j)
+                if collect_agent_logs:
+                    agent_logs.append(
+                        {
+                            "agent_id": agents[j].agent_id,
+                            "role_name": agents[j].role_name,
+                            "output_type": "latent",
+                            "system_prompt": agents[j].system_prompt,
+                            "received_upstream_prefix": upstream_prefix is not None,
+                            "upstream_prefix": summarize_tensor("upstream_prefix", upstream_prefix),
+                            "hidden_trajectory": summarize_tensor("hidden_trajectory", S_j),
+                            "compressed_prefix": summarize_tensor("compressed_prefix", P_j),
+                        }
+                    )
             else:
                 # ── Terminal agent ──
                 all_prefixes.append(None)
@@ -99,6 +124,21 @@ class DAGExecutor:
                         use_upstream_prefix=use_terminal_prefix,
                         do_sample=do_sample,
                     )
+                    if collect_agent_logs:
+                        agent_logs.append(
+                            {
+                                "agent_id": agents[j].agent_id,
+                                "role_name": agents[j].role_name,
+                                "output_type": "text",
+                                "system_prompt": agents[j].system_prompt,
+                                "received_upstream_prefix": upstream_prefix is not None,
+                                "upstream_prefix": summarize_tensor("upstream_prefix", upstream_prefix),
+                                "inference_mode": inference_mode,
+                                "used_upstream_prefix": use_terminal_prefix,
+                                "generated_text": generation["generated_text"],
+                                "generation": generation,
+                            }
+                        )
 
         if training:
              return {
@@ -112,4 +152,5 @@ class DAGExecutor:
                 "generated_text": generation["generated_text"],
                 "generation": generation,
                 "all_prefixes": all_prefixes,
+                "agent_logs": agent_logs,
             }

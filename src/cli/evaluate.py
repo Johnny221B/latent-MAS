@@ -31,14 +31,28 @@ from data.dataset import create_dataset
 from src.models.agent import Agent
 
 
-def append_jsonl_record(path: Path, record: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+def build_agent_sample_log(
+    question: str,
+    gold: str,
+    prediction: str,
+    generated_text: str,
+    generation: dict,
+    correct: bool,
+    agent_logs: list[dict],
+) -> dict:
+    return {
+        "question": question,
+        "gold": gold,
+        "prediction": prediction,
+        "generated_text": generated_text[:500],
+        "generation": generation,
+        "correct": correct,
+        "agents": agent_logs,
+    }
 
 
-def write_partial_eval_snapshot(
-    partial_path: Path,
+def write_eval_snapshot(
+    eval_path: Path,
     method: str,
     task: str,
     correct: int,
@@ -46,7 +60,9 @@ def write_partial_eval_snapshot(
     time_seconds: float,
     parameters: dict,
     world_size: int,
-    jsonl_path: Path,
+    samples: list[dict],
+    baseline_single_model: dict | None = None,
+    comparison: dict | None = None,
 ) -> None:
     accuracy = correct / total * 100 if total > 0 else 0.0
     payload = {
@@ -60,10 +76,32 @@ def write_partial_eval_snapshot(
         },
         "parameters": parameters,
         "world_size": world_size,
-        "samples_jsonl": str(jsonl_path),
+        "samples": samples,
     }
-    partial_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(partial_path, "w", encoding="utf-8") as f:
+    if baseline_single_model is not None:
+        payload["baseline_single_model"] = baseline_single_model
+    if comparison is not None:
+        payload["comparison"] = comparison
+    eval_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(eval_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def write_agent_log_snapshot(
+    agent_log_path: Path,
+    method: str,
+    task: str,
+    parameters: dict,
+    samples: list[dict],
+) -> None:
+    payload = {
+        "method": method,
+        "task": task,
+        "parameters": parameters,
+        "samples": samples,
+    }
+    agent_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(agent_log_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
@@ -94,8 +132,10 @@ def setup_eval_distributed() -> tuple[torch.device, int, int, bool]:
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         dist.init_process_group(backend="gloo")
         if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-            device = torch.device(f"cuda:{local_rank}")
+            device_count = max(torch.cuda.device_count(), 1)
+            device_index = local_rank % device_count
+            torch.cuda.set_device(device_index)
+            device = torch.device(f"cuda:{device_index}")
         else:
             device = torch.device("cpu")
         return device, rank, world_size, True
@@ -136,6 +176,7 @@ def evaluate(
     use_terminal_prefix: bool = True,
     run_baseline: bool = False,
     do_sample: bool = False,
+    write_agent_logs: bool = True,
 ):
     config = load_config(config_path)
     generation_max_new_tokens = max_new_tokens
@@ -193,77 +234,112 @@ def evaluate(
     correct = 0
     total = 0
     results = []
+    agent_log_results = []
     checkpoint_dir = Path(checkpoint_path).parent
-    jsonl_path = checkpoint_dir / f"eval_samples.rank{rank}.jsonl"
-    partial_eval_path = checkpoint_dir / f"eval_results.partial.rank{rank}.json"
-    partial_baseline_path = checkpoint_dir / f"eval_results.baseline_single.partial.rank{rank}.json"
-    for path in (jsonl_path, partial_eval_path, partial_baseline_path):
-        if path.exists():
-            path.unlink()
+    eval_path = checkpoint_dir / "eval_results.json"
+    agent_log_path = checkpoint_dir / "agent_logs.json"
+    if is_main_process(rank):
+        cleanup_patterns = [
+            "eval_results.partial.rank*.json",
+            "eval_results.rank*.json",
+            "eval_samples.rank*.jsonl",
+            "agent_logs.rank*.jsonl",
+        ]
+        for pattern in cleanup_patterns:
+            for path in checkpoint_dir.glob(pattern):
+                path.unlink()
+        for path in (eval_path, agent_log_path):
+            if path.exists():
+                path.unlink()
 
     if is_main_process(rank):
         print("\nRunning evaluation...")
     t_start = time.time()
 
+    local_steps = len(dataloader)
+    step_counts = gather_sharded_objects(local_steps, rank, world_size)
+    max_steps = max(step_counts)
+    dataloader_iter = iter(dataloader)
+
     with torch.no_grad():
-        for idx, batch in enumerate(dataloader):
+        for idx in range(max_steps):
+            batch = None
+            local_update = None
             t0 = time.time()
 
-            # Tokenize question
-            tokenized = system.base_model.tokenize(
-                batch["questions"],
-                max_length=config["training"].get("max_seq_len", 2048),
-            )
-            task_ids = tokenized["input_ids"].to(device)
-            task_mask = tokenized["attention_mask"].to(device)
+            if idx < local_steps:
+                batch = next(dataloader_iter)
 
-            # Run inference (no answer_ids → triggers generate_answer path)
-            output = system(
-                task_token_ids=task_ids,
-                task_attention_mask=task_mask,
-                max_new_tokens=generation_max_new_tokens,
-                inference_mode=inference_mode,
-                use_terminal_prefix=use_terminal_prefix,
-                do_sample=do_sample,
-            )
+                tokenized = system.base_model.tokenize(
+                    batch["questions"],
+                    max_length=config["training"].get("max_seq_len", 2048),
+                )
+                task_ids = tokenized["input_ids"].to(device)
+                task_mask = tokenized["attention_mask"].to(device)
 
-            generated_text = output["generated_text"]
-            generation = output.get("generation", {})
+                output = system(
+                    task_token_ids=task_ids,
+                    task_attention_mask=task_mask,
+                    max_new_tokens=generation_max_new_tokens,
+                    inference_mode=inference_mode,
+                    use_terminal_prefix=use_terminal_prefix,
+                    do_sample=do_sample,
+                    collect_agent_logs=write_agent_logs,
+                )
 
-            # Extract and compare answer
-            pred = extract_answer(generated_text, task_type=task)
-            gold = batch["answers"][0].strip()
-            is_correct = pred.strip() == gold.strip()
+                generated_text = output["generated_text"]
+                generation = output.get("generation", {})
+                agent_logs = output.get("agent_logs", [])
 
-            if is_correct:
-                correct += 1
-            total += 1
+                pred = extract_answer(generated_text, task_type=task)
+                gold = batch["answers"][0].strip()
+                is_correct = pred.strip() == gold.strip()
 
-            t1 = time.time()
-
-            results.append({
-                "question": batch["questions"][0],
-                "gold": gold,
-                "prediction": pred,
-                "generated_text": generated_text[:500],
-                "generation": generation,
-                "correct": is_correct,
-            })
-            append_jsonl_record(
-                jsonl_path,
-                {
-                    "phase": "ours",
-                    "rank": rank,
+                local_update = {
                     "question": batch["questions"][0],
                     "gold": gold,
                     "prediction": pred,
                     "generated_text": generated_text[:500],
                     "generation": generation,
                     "correct": is_correct,
-                },
-            )
-            write_partial_eval_snapshot(
-                partial_path=partial_eval_path,
+                    "agent_log": build_agent_sample_log(
+                        question=batch["questions"][0],
+                        gold=gold,
+                        prediction=pred,
+                        generated_text=generated_text,
+                        generation=generation,
+                        correct=is_correct,
+                        agent_logs=agent_logs,
+                    ) if write_agent_logs else None,
+                    "sample_seconds": time.time() - t0,
+                }
+
+            gathered_updates = gather_sharded_objects(local_update, rank, world_size)
+
+            if not is_main_process(rank):
+                continue
+
+            for shard_update in gathered_updates:
+                if shard_update is None:
+                    continue
+                if shard_update["correct"]:
+                    correct += 1
+                total += 1
+                sample_result = {
+                    "question": shard_update["question"],
+                    "gold": shard_update["gold"],
+                    "prediction": shard_update["prediction"],
+                    "generated_text": shard_update["generated_text"],
+                    "generation": shard_update["generation"],
+                    "correct": shard_update["correct"],
+                }
+                if write_agent_logs and shard_update["agent_log"] is not None:
+                    sample_result["agent_log"] = shard_update["agent_log"]
+                    agent_log_results.append(shard_update["agent_log"])
+                results.append(sample_result)
+
+            write_eval_snapshot(
+                eval_path=eval_path,
                 method="ours_trained_multi_agent",
                 task=task,
                 correct=correct,
@@ -277,38 +353,42 @@ def evaluate(
                     "inference_mode": inference_mode,
                     "use_terminal_prefix": use_terminal_prefix,
                     "do_sample": do_sample,
+                    "write_agent_logs": write_agent_logs,
                     "config": copy.deepcopy(config),
-                    "rank": rank,
                 },
                 world_size=world_size,
-                jsonl_path=jsonl_path,
+                samples=results,
             )
-
-            # Print progress
-            if is_main_process(rank) and ((idx + 1) % 10 == 0 or (idx + 1) == len(dataloader)):
-                acc = correct / total * 100
-                print(
-                    f"  [rank{rank} {idx+1}/{len(dataloader)}] "
-                    f"Acc: {acc:.1f}% ({correct}/{total}) | "
-                    f"{t1-t0:.1f}s/sample"
+            if write_agent_logs:
+                write_agent_log_snapshot(
+                    agent_log_path=agent_log_path,
+                    method="ours_trained_multi_agent",
+                    task=task,
+                    parameters={
+                        "config_path": config_path,
+                        "checkpoint_path": checkpoint_path,
+                        "max_samples": max_samples,
+                        "generation_max_new_tokens": generation_max_new_tokens,
+                        "inference_mode": inference_mode,
+                        "use_terminal_prefix": use_terminal_prefix,
+                        "do_sample": do_sample,
+                        "write_agent_logs": write_agent_logs,
+                    },
+                    samples=agent_log_results,
                 )
 
-            # Print some examples
-            if is_main_process(rank) and idx < 5:
-                status = "✓" if is_correct else "✗"
-                print(f"\n  Example {idx+1} [{status}]:")
-                print(f"    Q: {batch['questions'][0][:100]}...")
-                print(f"    Gold: {gold}")
-                print(f"    Pred: {pred}")
-                print(f"    Gen:  {generated_text[:200]}")
+            if total > 0 and ((total % 10) == 0 or total == len(full_dataset)):
+                acc = correct / total * 100
+                print(f"  [{total}/{len(full_dataset)}] Acc: {acc:.1f}% ({correct}/{total})")
 
-    local_eval = {
-        "correct": correct,
-        "total": total,
-        "samples": results,
-        "time_seconds": time.time() - t_start,
-    }
-    gathered_eval = gather_sharded_objects(local_eval, rank, world_size)
+            if total <= 5 and results:
+                latest = results[-1]
+                status = "✓" if latest["correct"] else "✗"
+                print(f"\n  Example {total} [{status}]:")
+                print(f"    Q: {latest['question'][:100]}...")
+                print(f"    Gold: {latest['gold']}")
+                print(f"    Pred: {latest['prediction']}")
+                print(f"    Gen:  {latest['generated_text'][:200]}")
 
     if not is_main_process(rank):
         if is_dist:
@@ -317,15 +397,8 @@ def evaluate(
         return
 
     # ── Summary ──
-    all_results = []
-    correct = 0
-    total = 0
-    t_total = 0.0
-    for shard in gathered_eval:
-        correct += shard["correct"]
-        total += shard["total"]
-        all_results.extend(shard["samples"])
-        t_total = max(t_total, shard["time_seconds"])
+    all_results = results
+    t_total = time.time() - t_start
     accuracy = correct / total * 100 if total > 0 else 0.0
 
     print(f"\n{'='*60}")
@@ -338,32 +411,30 @@ def evaluate(
     print(f"  Time:     {t_total:.1f}s ({t_total/total:.1f}s/sample)")
     print(f"{'='*60}")
 
-    # ── Save results ──
-    eval_path = checkpoint_dir / "eval_results.json"
-    with open(eval_path, "w") as f:
-        json.dump({
-            "method": "ours_trained_multi_agent",
-            "task": task,
-            "metrics": {
-                "accuracy": accuracy,
-                "correct": correct,
-                "total": total,
-                "time_seconds": t_total,
-            },
-            "parameters": {
-                "config_path": config_path,
-                "checkpoint_path": checkpoint_path,
-                "max_samples": max_samples,
-                "generation_max_new_tokens": generation_max_new_tokens,
-                "inference_mode": inference_mode,
-                "use_terminal_prefix": use_terminal_prefix,
-                "do_sample": do_sample,
-                "config": copy.deepcopy(config),
-            },
-            "world_size": world_size,
-            "samples": all_results,
-        }, f, indent=2, ensure_ascii=False)
+    write_eval_snapshot(
+        eval_path=eval_path,
+        method="ours_trained_multi_agent",
+        task=task,
+        correct=correct,
+        total=total,
+        time_seconds=t_total,
+        parameters={
+            "config_path": config_path,
+            "checkpoint_path": checkpoint_path,
+            "max_samples": max_samples,
+            "generation_max_new_tokens": generation_max_new_tokens,
+            "inference_mode": inference_mode,
+            "use_terminal_prefix": use_terminal_prefix,
+            "do_sample": do_sample,
+            "write_agent_logs": write_agent_logs,
+            "config": copy.deepcopy(config),
+        },
+        world_size=world_size,
+        samples=all_results,
+    )
     print(f"  Results saved: {eval_path}")
+    if write_agent_logs:
+        print(f"  Agent logs saved: {agent_log_path}")
 
     if not run_baseline:
         if is_dist:
@@ -380,8 +451,11 @@ def evaluate(
     baseline_total = 0
     baseline_samples = []
 
-    with torch.no_grad():
-        for idx, batch in enumerate(dataloader):
+    dataloader_iter = iter(dataloader)
+    for idx in range(max_steps):
+        baseline_update = None
+        if idx < local_steps:
+            batch = next(dataloader_iter)
             tokenized = system.base_model.tokenize(
                 batch["questions"],
                 max_length=config["training"].get("max_seq_len", 2048),
@@ -389,7 +463,6 @@ def evaluate(
             task_ids = tokenized["input_ids"].to(device)
             task_mask = tokenized["attention_mask"].to(device)
 
-            # Direct generation without any prefix
             gen_out = system.base_model.model.generate(
                 input_ids=task_ids,
                 attention_mask=task_mask,
@@ -411,66 +484,70 @@ def evaluate(
 
             pred = extract_answer(baseline_text, task_type=task)
             gold = batch["answers"][0].strip()
-            is_correct = pred.strip() == gold.strip()
-            if is_correct:
-                baseline_correct += 1
-            baseline_total += 1
-            baseline_samples.append({
+            baseline_update = {
                 "question": batch["questions"][0],
                 "gold": gold,
                 "prediction": pred,
                 "generated_text": baseline_text[:500],
                 "generation": generation,
-                "correct": is_correct,
-            })
-            append_jsonl_record(
-                jsonl_path,
-                {
-                    "phase": "baseline_single_model",
-                    "rank": rank,
-                    "question": batch["questions"][0],
-                    "gold": gold,
-                    "prediction": pred,
-                    "generated_text": baseline_text[:500],
-                    "generation": generation,
-                    "correct": is_correct,
+                "correct": pred.strip() == gold.strip(),
+            }
+
+        gathered_baseline_updates = gather_sharded_objects(baseline_update, rank, world_size)
+        if not is_main_process(rank):
+            continue
+        for shard_update in gathered_baseline_updates:
+            if shard_update is None:
+                continue
+            if shard_update["correct"]:
+                baseline_correct += 1
+            baseline_total += 1
+            baseline_samples.append(shard_update)
+
+        baseline_acc = baseline_correct / baseline_total * 100 if baseline_total > 0 else 0.0
+        write_eval_snapshot(
+            eval_path=eval_path,
+            method="ours_trained_multi_agent",
+            task=task,
+            correct=correct,
+            total=total,
+            time_seconds=t_total,
+            parameters={
+                "config_path": config_path,
+                "checkpoint_path": checkpoint_path,
+                "max_samples": max_samples,
+                "generation_max_new_tokens": generation_max_new_tokens,
+                "inference_mode": inference_mode,
+                "use_terminal_prefix": use_terminal_prefix,
+                "do_sample": do_sample,
+                "write_agent_logs": write_agent_logs,
+                "config": copy.deepcopy(config),
+            },
+            world_size=world_size,
+            samples=all_results,
+            baseline_single_model={
+                "method": "single_model",
+                "metrics": {
+                    "accuracy": baseline_acc,
+                    "correct": baseline_correct,
+                    "total": baseline_total,
                 },
-            )
-            write_partial_eval_snapshot(
-                partial_path=partial_baseline_path,
-                method="single_model",
-                task=task,
-                correct=baseline_correct,
-                total=baseline_total,
-                time_seconds=time.time() - t_start,
-                parameters={
+                "parameters": {
                     "generation_max_new_tokens": generation_max_new_tokens,
                     "do_sample": False,
                     "world_size": world_size,
-                    "rank": rank,
                 },
-                world_size=world_size,
-                jsonl_path=jsonl_path,
-            )
+                "samples": baseline_samples,
+            },
+            comparison={
+                "baseline_accuracy": baseline_acc,
+                "improvement": accuracy - baseline_acc,
+            },
+        )
 
-            if is_main_process(rank) and (idx + 1) % 50 == 0:
-                bacc = baseline_correct / baseline_total * 100
-                print(f"  [{idx+1}/{len(dataloader)}] Baseline Acc: {bacc:.1f}%")
+        if baseline_total > 0 and (baseline_total % 50) == 0:
+            print(f"  [{baseline_total}/{len(full_dataset)}] Baseline Acc: {baseline_acc:.1f}%")
 
-    local_baseline = {
-        "correct": baseline_correct,
-        "total": baseline_total,
-        "samples": baseline_samples,
-    }
-    gathered_baseline = gather_sharded_objects(local_baseline, rank, world_size)
-
-    baseline_samples = []
-    baseline_correct = 0
-    baseline_total = 0
-    for shard in gathered_baseline:
-        baseline_correct += shard["correct"]
-        baseline_total += shard["total"]
-        baseline_samples.extend(shard["samples"])
     baseline_acc = baseline_correct / baseline_total * 100 if baseline_total > 0 else 0.0
 
     print(f"\n{'='*60}")
@@ -482,28 +559,45 @@ def evaluate(
     print(f"{'='*60}")
 
     # Append baseline to results
-    with open(eval_path, "r") as f:
-        eval_data = json.load(f)
-    eval_data["baseline_single_model"] = {
-        "method": "single_model",
-        "metrics": {
-            "accuracy": baseline_acc,
-            "correct": baseline_correct,
-            "total": baseline_total,
-        },
-        "parameters": {
+    write_eval_snapshot(
+        eval_path=eval_path,
+        method="ours_trained_multi_agent",
+        task=task,
+        correct=correct,
+        total=total,
+        time_seconds=t_total,
+        parameters={
+            "config_path": config_path,
+            "checkpoint_path": checkpoint_path,
+            "max_samples": max_samples,
             "generation_max_new_tokens": generation_max_new_tokens,
-            "do_sample": False,
-            "world_size": world_size,
+            "inference_mode": inference_mode,
+            "use_terminal_prefix": use_terminal_prefix,
+            "do_sample": do_sample,
+            "write_agent_logs": write_agent_logs,
+            "config": copy.deepcopy(config),
         },
-        "samples": baseline_samples,
-    }
-    eval_data["comparison"] = {
-        "baseline_accuracy": baseline_acc,
-        "improvement": accuracy - baseline_acc,
-    }
-    with open(eval_path, "w") as f:
-        json.dump(eval_data, f, indent=2, ensure_ascii=False)
+        world_size=world_size,
+        samples=all_results,
+        baseline_single_model={
+            "method": "single_model",
+            "metrics": {
+                "accuracy": baseline_acc,
+                "correct": baseline_correct,
+                "total": baseline_total,
+            },
+            "parameters": {
+                "generation_max_new_tokens": generation_max_new_tokens,
+                "do_sample": False,
+                "world_size": world_size,
+            },
+            "samples": baseline_samples,
+        },
+        comparison={
+            "baseline_accuracy": baseline_acc,
+            "improvement": accuracy - baseline_acc,
+        },
+    )
 
     if is_dist:
         dist.barrier()
@@ -533,6 +627,7 @@ if __name__ == "__main__":
         help="Also run the embedded single-model baseline after ours eval.",
     )
     parser.add_argument("--do-sample", action="store_true")
+    parser.add_argument("--no-agent-logs", action="store_true")
     args = parser.parse_args()
     evaluate(
         args.config,
@@ -543,4 +638,5 @@ if __name__ == "__main__":
         use_terminal_prefix=not args.no_terminal_prefix,
         run_baseline=args.run_baseline,
         do_sample=args.do_sample,
+        write_agent_logs=not args.no_agent_logs,
     )

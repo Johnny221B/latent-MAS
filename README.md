@@ -26,6 +26,12 @@ AutoTokenizer.from_pretrained(model_name, cache_dir='./weights')
 bash scripts/train.sh --config configs/experiments/gsm8k_3agent.yaml
 ```
 
+多卡训练示例：
+
+```bash
+NPROC_PER_NODE=2 bash scripts/train.sh --config configs/experiments/gsm8k_3agent.yaml
+```
+
 ## Project Structure
 
 - `configs/` — Role definitions, graph priors, experiment configs

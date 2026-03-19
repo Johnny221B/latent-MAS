@@ -190,6 +190,48 @@ def test_dag_executor_passes_terminal_inference_options():
     assert terminal.kwargs["do_sample"] is False
 
 
+def test_dag_executor_collects_agent_logs():
+    class FakeAgent:
+        def __init__(self, agent_id, role_name):
+            self.agent_id = agent_id
+            self.role_name = role_name
+            self.system_prompt = f"prompt-{role_name}"
+
+        def reason(self, **kwargs):
+            return {
+                "hidden_trajectory": torch.ones(1, 2, 4),
+                "compressor_mask": torch.ones(1, 2),
+            }
+
+        def generate_answer(self, **kwargs):
+            return {
+                "generated_text": "42",
+                "finish_reason": "eos",
+                "generated_token_count": 2,
+                "stopped_early": True,
+            }
+
+    class FakeCompressor:
+        def __call__(self, hidden, mask=None):
+            return torch.ones(1, 1, 4) * 3
+
+    executor = DAGExecutor(aggregator=MessageAggregator())
+    out = executor.execute(
+        agents=[FakeAgent(0, "reader"), FakeAgent(1, "solver")],
+        adjacency=torch.zeros(2, 2),
+        compressor=FakeCompressor(),
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        training=False,
+        collect_agent_logs=True,
+    )
+
+    assert len(out["agent_logs"]) == 2
+    assert out["agent_logs"][0]["output_type"] == "latent"
+    assert out["agent_logs"][0]["hidden_trajectory"]["shape"] == [1, 2, 4]
+    assert out["agent_logs"][1]["output_type"] == "text"
+    assert out["agent_logs"][1]["generated_text"] == "42"
+
+
 if __name__ == "__main__":
     test_aggregator_no_upstream()
     test_aggregator_weighted_sum()

@@ -17,7 +17,7 @@ training:
   lr: 0.0005
   weight_decay: 0.01
   epochs: 1
-  max_seq_len: 2048
+  max_seq_len: 16384
   lambda_add: 0.1       # penalty for adding edges not in prior
   lambda_drop: 0.005      # penalty for dropping edges in prior
   lambda_sparse: 0.005    # penalty for sparsity of edges

@@ -124,6 +124,7 @@ class MultiAgentSystem(nn.Module):
         inference_mode: str = "legacy_plain_with_prefix",
         use_terminal_prefix: bool = True,
         do_sample: bool = True,
+        collect_agent_logs: bool = False,
     ) -> dict:
         """Full forward pass.
 
@@ -152,6 +153,7 @@ class MultiAgentSystem(nn.Module):
             inference_mode=inference_mode,
             use_terminal_prefix=use_terminal_prefix,
             do_sample=do_sample,
+            collect_agent_logs=collect_agent_logs,
         )
 
         result = {"adjacency": A}
@@ -184,6 +186,8 @@ class MultiAgentSystem(nn.Module):
         else:
             result["generated_text"] = dag_output["generated_text"]
             result["generation"] = dag_output["generation"]
+            if collect_agent_logs:
+                result["agent_logs"] = dag_output.get("agent_logs", [])
 
         return result
 

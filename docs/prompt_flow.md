@@ -169,6 +169,155 @@ $$
 
 此时不再拼接标准答案，而是让模型自回归生成输出文本。
 
+### 5.5 `legacy_plain_with_prefix` 与 `chat_with_prefix` 的区别
+
+当前评测脚本中，终端 agent 的生成路径支持两种主要输入模式：
+
+- `legacy_plain_with_prefix`
+- `chat_with_prefix`
+
+它们的共同点是：
+
+- 都可以使用上游 agent 聚合得到的 latent prefix
+- 都会复用角色文件中的 `system_prompt`
+- 都是在终端 agent 的 `generate_answer()` 中执行
+
+它们的关键区别不在于“有没有 latent prefix”，而在于“问题侧文本输入是如何组织的”。
+
+#### 5.5.1 `legacy_plain_with_prefix`
+
+这是较早的纯 token 拼接路径。终端 agent 会先把：
+
+- role prompt token
+- question token
+
+直接拼成：
+
+$$
+[p_T ; x]
+$$
+
+如果启用了上游 latent communication，则真正送入模型的是：
+
+$$
+[z_T ; p_T ; x]
+$$
+
+这里的含义是：
+
+- $z_T$：上游 agent 聚合后的 latent prefix，以 embedding 前缀形式注入
+- $p_T$：终端 agent 的 role prompt token
+- $x$：问题 token
+
+可以把它画成：
+
+```text
+legacy_plain_with_prefix
+
+upstream latent prefix:   [ z_T ]
+text tokens:              [ role prompt ][ question ]
+model input:              [ z_T ][ role prompt ][ question ]
+```
+
+这种方式不会走 chat template，而是把 `system_prompt` 当作普通文本 token 直接拼到问题前面。
+
+#### 5.5.2 `chat_with_prefix`
+
+这是当前评测默认使用的路径。它会先把终端 agent 的文本输入构造成 chat prompt，而不是直接做裸 token 拼接。
+
+也就是说，问题侧文本先被整理成近似下面这种结构：
+
+```text
+system: <system_prompt>
+user:   <question>
+assistant:
+```
+
+然后再通过 tokenizer 的 chat template 渲染成实际 token 序列。
+
+如果启用了上游 latent communication，则真正送入模型的是：
+
+$$
+[z_T ; \mathrm{Chat}(p_T, x)]
+$$
+
+其中：
+
+- $\mathrm{Chat}(p_T, x)$ 表示由 `system_prompt` 和 `question` 共同构造出的 chat-format prompt
+
+可以把它画成：
+
+```text
+chat_with_prefix
+
+upstream latent prefix:   [ z_T ]
+chat-formatted text:      [ system: role prompt ][ user: question ][ assistant: ]
+model input:              [ z_T ][ chat-formatted text ]
+```
+
+因此，`chat_with_prefix` 不是“去掉了 role prompt”，而是把 role prompt 从“普通前缀 token”变成了“chat system message 的一部分”。
+
+#### 5.5.3 两种模式的对比图
+
+把终端 agent 的输入并排写出来，可以更清楚地看到差异：
+
+```text
+Mode A: legacy_plain_with_prefix
+[ latent prefix ][ role prompt tokens ][ question tokens ]
+
+Mode B: chat_with_prefix
+[ latent prefix ][ chat(system=role prompt, user=question, assistant prompt) ]
+```
+
+如果进一步展开成更直观的示意：
+
+```text
+legacy_plain_with_prefix
+    latent part: [ z_T ]
+    text part:   [ You are a solver ... ][ If Alice has 3 apples ... ]
+
+chat_with_prefix
+    latent part: [ z_T ]
+    text part:   [ <system>You are a solver ...</system>
+                   <user>If Alice has 3 apples ...</user>
+                   <assistant> ]
+```
+
+#### 5.5.4 为什么 `chat_with_prefix` 更适合当前 Qwen 模型
+
+当前仓库使用的是 chat-style instruction model。对这类模型来说，输入如果符合它预训练/指令微调时习惯的 chat template，通常会比“把 system prompt 当普通文本硬拼在前面”更稳定。
+
+因此：
+
+- `legacy_plain_with_prefix` 更接近早期实现思路
+- `chat_with_prefix` 更接近当前 chat 模型的原生使用方式
+
+这也是为什么当前评测默认改成了 `chat_with_prefix`。
+
+#### 5.5.5 `--no-terminal-prefix` 是什么关系
+
+还需要特别区分一个独立开关：`--no-terminal-prefix`。
+
+这个开关控制的是：
+
+- 终端 agent 在评测时是否使用上游 latent prefix
+
+它与 `legacy_plain_with_prefix` / `chat_with_prefix` 不是同一个维度。
+
+因此可以组合成：
+
+- `legacy_plain_with_prefix` + 使用 prefix
+- `chat_with_prefix` + 使用 prefix
+- `chat_with_prefix` + 不使用 prefix
+
+最后一种可以近似写成：
+
+```text
+[ chat(system=role prompt, user=question, assistant prompt) ]
+```
+
+也就是只保留 chat-format 文本输入，不再让终端 agent 接收来自上游 agent 的 latent communication。
+
 ## 6. `eval` 有没有单独的 prompt
 
 对 `ours` 方法来说，答案是否生成于训练还是评测，并不会切换到另一套 prompt 文件。

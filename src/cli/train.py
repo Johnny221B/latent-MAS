@@ -1,23 +1,34 @@
 """
-Training entry point for the multi-agent latent communication system.
+Unified training entry point with proper multi-GPU DDP support.
 
-Usage:
-    python src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml
-    python src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml --max_samples 100
+Single GPU:
+    uv run --python .venv/bin/python torchrun --nproc_per_node=1 src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml
+
+Multi-GPU (8 cards):
+    uv run --python .venv/bin/python torchrun --nproc_per_node=8 src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml
+
+Specific GPUs:
+    CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --python .venv/bin/python torchrun --nproc_per_node=4 src/cli/train.py --config configs/experiments/gsm8k_3agent.yaml
 """
 
 import argparse
+import os
 import sys
+import time
 from pathlib import Path
+import csv
+from datetime import datetime
 
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 import torch
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim import AdamW
 
 from src.utils.config import load_config
+from src.utils.output_paths import build_timestamped_output_dir
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
 from src.utils.training import compute_grad_norm, validate_min_samples_for_batches
 from src.pipeline.multi_agent_system import MultiAgentSystem
@@ -31,26 +42,94 @@ def collate_fn(batch: list[dict]) -> dict:
     }
 
 
+def format_duration(seconds: float) -> str:
+    seconds = max(int(seconds), 0)
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:d}h{minutes:02d}m{secs:02d}s"
+    if minutes > 0:
+        return f"{minutes:d}m{secs:02d}s"
+    return f"{secs:d}s"
+
+
+def is_main_process() -> bool:
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
+def setup_distributed():
+    """Initialize DDP if launched with torchrun or manual launcher."""
+    if "RANK" in os.environ:
+        rank = int(os.environ["RANK"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+        )
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+
+        if rank == 0:
+            print(f"DDP initialized: {world_size} processes")
+            print(f"  Each process sees {torch.cuda.device_count()} GPU(s)")
+        return device, True
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Single process mode: {device}")
+        return device, False
+
+
+def cleanup_distributed():
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def train(config_path: str, max_samples: int | None = None):
     config = load_config(config_path)
     training_cfg = config["training"]
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
 
-    # ── Build system ──
-    print("Building multi-agent system...")
+    # ── Setup device ──
+    device, is_ddp = setup_distributed()
+    world_size = dist.get_world_size() if is_ddp else 1
+    rank = dist.get_rank() if is_ddp else 0
+
+    # ── Build system (each process loads its own copy) ──
+    if is_main_process():
+        print("Building multi-agent system...")
     system = MultiAgentSystem(config)
     system.to(device)
 
-    total_params = sum(p.numel() for p in system.parameters())
-    trainable_params = sum(p.numel() for p in system.get_trainable_params())
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Frozen parameters: {total_params - trainable_params:,}")
-    print(f"\nInitial graph:\n{system.log_adjacency()}")
+    if is_main_process():
+        total_params = sum(p.numel() for p in system.parameters())
+        trainable_params = sum(p.numel() for p in system.get_trainable_params())
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Frozen parameters: {total_params - trainable_params:,}")
+        print(f"\nInitial graph:\n{system.log_adjacency()}")
+        mem = torch.cuda.max_memory_allocated(device) / 1024**3
+        print(f"GPU memory after model load: {mem:.2f} GB")
+
+    # ── Wrap trainable modules with DDP ──
+    # We can't wrap the entire system (it has frozen model + complex structure)
+    # Instead, wrap only the trainable modules
+    if is_ddp:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        # Wrap compressor with DDP
+        system.compressor = DDP(
+            system.compressor,
+            device_ids=[device.index],
+            find_unused_parameters=True,
+        )
+        # Adjacency is tiny, sync its gradients manually
+        # (DDP overhead not worth it for 25 parameters)
 
     # ── Dataset ──
-    print(f"\nLoading dataset: {training_cfg['task']}...")
+    if is_main_process():
+        print(f"\nLoading dataset: {training_cfg['task']}...")
     dataset = create_dataset(
         task=training_cfg["task"],
         split="train",
@@ -59,51 +138,82 @@ def train(config_path: str, max_samples: int | None = None):
     validate_min_samples_for_batches(
         dataset_size=len(dataset),
         per_gpu_batch_size=training_cfg["batch_size"],
-        world_size=1,
+        world_size=world_size,
         drop_last=True,
     )
+
+    # DistributedSampler splits data across GPUs
+    sampler = DistributedSampler(dataset, shuffle=True) if is_ddp else None
     dataloader = DataLoader(
         dataset,
-        batch_size=training_cfg["batch_size"],
-        shuffle=True,
+        batch_size=training_cfg["batch_size"],  # per-GPU batch size
+        shuffle=(sampler is None),
+        sampler=sampler,
         collate_fn=collate_fn,
         drop_last=True,
     )
-    print(f"Dataset size: {len(dataset)}, Batches: {len(dataloader)}")
+
+    if is_main_process():
+        print(f"Dataset size: {len(dataset)}")
+        print(f"Per-GPU batch size: {training_cfg['batch_size']}")
+        print(f"Effective batch size: {training_cfg['batch_size'] * world_size}")
+        print(f"Batches per epoch per GPU: {len(dataloader)}")
 
     # ── Optimizer ──
     optimizer = AdamW(
         system.get_trainable_params(),
-        lr=training_cfg["lr"],
-        weight_decay=training_cfg.get("weight_decay", 0.01),
+        lr=float(training_cfg["lr"]),
+        weight_decay=float(training_cfg.get("weight_decay", 0.01)),
     )
 
     # ── Training loop ──
     grad_accum_steps = training_cfg.get("gradient_accumulation_steps", 1)
-    log_interval = training_cfg.get("log_interval", 50)
+    log_interval = training_cfg.get("log_interval", 1)
     save_interval = training_cfg.get("save_interval", 500)
-    output_dir = Path(config.get("output", {}).get("dir", "outputs"))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    wandb_run = init_wandb_run(config=config, output_dir=output_dir, rank=0)
+    compressor = system.compressor.module if is_ddp else system.compressor
+    adjacency = system.adjacency
+    
+    # ── Output directory with timestamp ──
+    base_output_dir = config.get("output", {}).get("dir", "outputs/run")
+    output_dir = build_timestamped_output_dir(base_output_dir)
+    if is_main_process():
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Save config for reproducibility
+        import yaml
+        with open(output_dir / "config.yaml", "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+        print(f"  Output dir: {output_dir}")
+
+    wandb_run = init_wandb_run(config=config, output_dir=output_dir, rank=rank)
+
+    # ── Loss log ──
+    loss_log = []  # list of dicts, saved to CSV
 
     global_step = 0
+    train_start = time.time()
+    total_batches = training_cfg["epochs"] * len(dataloader)
     for epoch in range(training_cfg["epochs"]):
+        if sampler is not None:
+            sampler.set_epoch(epoch)  # ensure different shuffling each epoch
+
         system.train()
         epoch_loss = 0.0
+        epoch_batches = 0
 
         for batch_idx, batch in enumerate(dataloader):
-            comp_grad_norm = None
-            adj_grad_norm = None
+            t0 = time.time()
+            comp_grad = None
+            adj_grad = None
+            mem = None
 
-            # ── Tokenize question ──
+            # ── Tokenize ──
             tokenized = system.base_model.tokenize(
                 batch["questions"],
-                max_length=training_cfg.get("max_seq_len", 512),
+                max_length=training_cfg.get("max_seq_len", 2048),
             )
             task_token_ids = tokenized["input_ids"].to(device)
             task_attention_mask = tokenized["attention_mask"].to(device)
 
-            # ── Tokenize answer ──
             answer_tokenized = system.base_model.tokenize(
                 batch["answers"],
                 max_length=2048,
@@ -111,10 +221,9 @@ def train(config_path: str, max_samples: int | None = None):
             answer_ids = answer_tokenized["input_ids"].to(device)
             answer_mask = answer_tokenized["attention_mask"].to(device)
 
-            # ── Forward (teacher forcing) ──
-            # Non-terminal agents: latent reasoning → compress → prefix
-            # Terminal agent sees: [prefix; role; question; answer]
-            # Loss computed only on answer positions
+            t1 = time.time()
+
+            # ── Forward ──
             output = system(
                 task_token_ids=task_token_ids,
                 task_attention_mask=task_attention_mask,
@@ -122,106 +231,158 @@ def train(config_path: str, max_samples: int | None = None):
                 answer_mask=answer_mask,
             )
 
+            t2 = time.time()
+
+            # ── Backward ──
             loss = output["loss"] / grad_accum_steps
             loss.backward()
 
+            t3 = time.time()
+
+            # ── Sync adjacency gradients across GPUs (manual allreduce) ──
+            if is_ddp and adjacency.logits.grad is not None:
+                dist.all_reduce(adjacency.logits.grad, op=dist.ReduceOp.AVG)
+
             if (batch_idx + 1) % grad_accum_steps == 0:
-                comp_grad_norm = compute_grad_norm(system.compressor.parameters())
-                adj_grad_norm = compute_grad_norm([system.adjacency.logits])
+                comp_grad = compute_grad_norm(compressor.parameters())
+                adj_grad = compute_grad_norm([adjacency.logits])
+                mem = torch.cuda.max_memory_allocated(device) / 1024**3
                 torch.nn.utils.clip_grad_norm_(system.get_trainable_params(), 1.0)
                 optimizer.step()
                 global_step += 1
-                log_wandb(
-                    wandb_run,
-                    {
-                        "train/global_step": global_step,
-                        "train/loss": output["loss"].item(),
-                        "train/task_loss": output["task_loss"].item(),
-                        "train/graph_loss": output["graph_loss"].item(),
-                        "train/graph_loss_add": output["graph_loss_add"].item(),
-                        "train/graph_loss_drop": output["graph_loss_drop"].item(),
-                        "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
-                        "train/comp_grad": comp_grad_norm,
-                        "train/adj_grad": adj_grad_norm,
-                        "train/epoch": epoch + 1,
-                        "train/batch": batch_idx + 1,
-                    },
-                    step=global_step,
-                )
+                if is_main_process():
+                    log_wandb(
+                        wandb_run,
+                        {
+                            "train/global_step": global_step,
+                            "train/loss": output["loss"].item(),
+                            "train/task_loss": output["task_loss"].item(),
+                            "train/graph_loss": output["graph_loss"].item(),
+                            "train/graph_loss_add": output["graph_loss_add"].item(),
+                            "train/graph_loss_drop": output["graph_loss_drop"].item(),
+                            "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
+                            "train/comp_grad": comp_grad,
+                            "train/adj_grad": adj_grad,
+                            "train/forward_seconds": t2 - t1,
+                            "train/backward_seconds": t3 - t2,
+                            "train/tokenize_seconds": t1 - t0,
+                            "train/max_memory_gb": mem,
+                            "train/epoch": epoch + 1,
+                            "train/batch": batch_idx + 1,
+                        },
+                        step=global_step,
+                    )
                 optimizer.zero_grad()
 
             epoch_loss += output["loss"].item()
+            epoch_batches += 1
 
-            # ── Logging ──
-            if (batch_idx + 1) % log_interval == 0:
-                avg_loss = epoch_loss / (batch_idx + 1)
-                display_comp_grad = comp_grad_norm if comp_grad_norm is not None else compute_grad_norm(system.compressor.parameters())
-                display_adj_grad = adj_grad_norm if adj_grad_norm is not None else compute_grad_norm([system.adjacency.logits])
+            # ── Logging (main process only) ──
+            if is_main_process() and (batch_idx + 1) % log_interval == 0:
+                display_comp_grad = comp_grad if comp_grad is not None else compute_grad_norm(compressor.parameters())
+                display_adj_grad = adj_grad if adj_grad is not None else compute_grad_norm([adjacency.logits])
+                display_mem = mem if mem is not None else torch.cuda.max_memory_allocated(device) / 1024**3
+                completed_batches = epoch * len(dataloader) + (batch_idx + 1)
+                elapsed_seconds = time.time() - train_start
+                avg_batch_seconds = elapsed_seconds / max(completed_batches, 1)
+                eta_seconds = avg_batch_seconds * max(total_batches - completed_batches, 0)
 
                 print(
-                    f"Epoch {epoch+1}/{training_cfg['epochs']} | "
-                    f"Step {global_step} | "
-                    f"Batch {batch_idx+1}/{len(dataloader)} | "
-                    f"Loss: {output['loss'].item():.4f} (avg: {avg_loss:.4f}) | "
-                    f"Task: {output['task_loss'].item():.4f} | "
-                    f"Graph: {output['graph_loss'].item():.4f} | "
-                    f"Comp∇: {display_comp_grad:.6f} | "
-                    f"Adj∇: {display_adj_grad:.6f}"
+                    f"  E{epoch+1} B{batch_idx+1}/{len(dataloader)} | "
+                    f"Loss:{output['loss'].item():.4f} "
+                    f"Task:{output['task_loss'].item():.4f} "
+                    f"Graph:{output['graph_loss'].item():.4f} | "
+                    f"C∇:{display_comp_grad:.6f} A∇:{display_adj_grad:.6f} | "
+                    f"tok:{t1-t0:.1f}s fwd:{t2-t1:.1f}s bwd:{t3-t2:.1f}s | "
+                    f"mem:{display_mem:.1f}GB | "
+                    f"elapsed:{format_duration(elapsed_seconds)} "
+                    f"eta:{format_duration(eta_seconds)}"
                 )
+                
+            # ── Record loss ──
+            if is_main_process():
+                loss_log.append({
+                    "epoch": epoch + 1,
+                    "batch": batch_idx + 1,
+                    "global_step": global_step,
+                    "loss": output["loss"].item(),
+                    "task_loss": output["task_loss"].item(),
+                    "graph_loss": output["graph_loss"].item(),
+                    "comp_grad": comp_grad,
+                    "adj_grad": adj_grad,
+                })
 
-            # ── Save checkpoint ──
-            if global_step > 0 and global_step % save_interval == 0:
+            # ── Checkpoint (main process only) ──
+            if is_main_process() and global_step > 0 and global_step % save_interval == 0:
                 ckpt_path = output_dir / f"checkpoint_step{global_step}.pt"
                 torch.save({
                     "step": global_step,
-                    "compressor_state": system.compressor.state_dict(),
-                    "adjacency_state": system.adjacency.state_dict(),
+                    "compressor_state": compressor.state_dict(),
+                    "adjacency_state": adjacency.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                 }, ckpt_path)
-                print(f"Saved checkpoint: {ckpt_path}")
+                print(f"  Saved: {ckpt_path}")
 
         # ── End of epoch ──
-        avg_loss = epoch_loss / len(dataloader)
-        print(f"\n{'='*60}")
-        print(f"Epoch {epoch+1} complete | Avg Loss: {avg_loss:.4f}")
-        print(system.log_adjacency())
-        print(f"{'='*60}\n")
-        A = system.adjacency.get_adjacency().detach()
+        if is_main_process():
+            avg_loss = epoch_loss / max(epoch_batches, 1)
+            elapsed_seconds = time.time() - train_start
+            remaining_epochs = training_cfg["epochs"] - (epoch + 1)
+            avg_epoch_seconds = elapsed_seconds / max(epoch + 1, 1)
+            eta_seconds = avg_epoch_seconds * remaining_epochs
+            print(f"\n{'='*60}")
+            print(
+                f"Epoch {epoch+1} complete | Avg Loss: {avg_loss:.4f} | "
+                f"elapsed: {format_duration(elapsed_seconds)} | "
+                f"eta: {format_duration(eta_seconds)}"
+            )
+            print(system.log_adjacency())
+            A = adjacency.get_adjacency().detach()
+            print(f"Adjacency range: [{A.min().item():.4f}, {A.max().item():.4f}]")
+            print(f"{'='*60}\n")
+            log_wandb(
+                wandb_run,
+                {
+                    "epoch/avg_loss": avg_loss,
+                    "epoch/adjacency_min": A.min().item(),
+                    "epoch/adjacency_max": A.max().item(),
+                    "epoch/index": epoch + 1,
+                },
+                step=global_step,
+            )
+            
+            csv_path = output_dir / "loss_log.csv"
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=loss_log[0].keys())
+                writer.writeheader()
+                writer.writerows(loss_log)
+
+    # ── Final save ──
+    if is_main_process():
+        final_path = output_dir / "final_model.pt"
+        torch.save({
+            "step": global_step,
+            "compressor_state": compressor.state_dict(),
+            "adjacency_state": adjacency.state_dict(),
+            "config": config,
+        }, final_path)
+        print(f"Training complete. Final model saved to {final_path}")
         log_wandb(
             wandb_run,
             {
-                "epoch/avg_loss": avg_loss,
-                "epoch/adjacency_min": A.min().item(),
-                "epoch/adjacency_max": A.max().item(),
-                "epoch/index": epoch + 1,
+                "final/global_step": global_step,
+                "final/output_dir": str(output_dir),
             },
             step=global_step,
         )
-
-    # ── Final save ──
-    final_path = output_dir / "final_model.pt"
-    torch.save({
-        "step": global_step,
-        "compressor_state": system.compressor.state_dict(),
-        "adjacency_state": system.adjacency.state_dict(),
-        "config": config,
-    }, final_path)
-    print(f"Training complete. Final model saved to {final_path}")
-    log_wandb(
-        wandb_run,
-        {
-            "final/global_step": global_step,
-            "final/output_dir": str(output_dir),
-        },
-        step=global_step,
-    )
     finish_wandb(wandb_run)
+
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train multi-agent latent communication system")
-    parser.add_argument("--config", type=str, required=True, help="Path to experiment config YAML")
-    parser.add_argument("--max_samples", type=int, default=None, help="Limit dataset size (for debugging)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--max_samples", type=int, default=None)
     args = parser.parse_args()
-
     train(args.config, args.max_samples)

@@ -34,36 +34,105 @@ def test_default_output_path_uses_model_and_sample_count():
     assert path.name == "single_model_qwen3-8b_16.json"
 
 
-def test_build_qwen_chat_text_uses_official_chat_template():
-    from src.cli.run_baseline_single_model import build_qwen_chat_text
+def test_build_qwen_chat_messages_uses_user_only_prompt():
+    from src.cli.run_baseline_single_model import build_qwen_chat_messages
 
-    class DummyTokenizer:
-        def __init__(self):
-            self.calls = []
-
-        def apply_chat_template(self, messages, tokenize, add_generation_prompt, enable_thinking):
-            self.calls.append(
-                {
-                    "messages": messages,
-                    "tokenize": tokenize,
-                    "add_generation_prompt": add_generation_prompt,
-                    "enable_thinking": enable_thinking,
-                }
-            )
-            return "formatted-prompt"
-
-    tokenizer = DummyTokenizer()
-    text = build_qwen_chat_text(tokenizer, "What is 2+2?")
-
-    assert text == "formatted-prompt"
-    assert tokenizer.calls == [
-        {
-            "messages": [{"role": "user", "content": "What is 2+2?"}],
-            "tokenize": False,
-            "add_generation_prompt": True,
-            "enable_thinking": True,
-        }
+    assert build_qwen_chat_messages("What is 2+2?") == [
+        {"role": "user", "content": "What is 2+2?"},
     ]
+
+
+def test_build_chat_payload_uses_openai_chat_api_shape():
+    from src.cli.run_baseline_single_model import build_chat_payload
+
+    payload = build_chat_payload(
+        model_name="Qwen/Qwen3-8B",
+        question="What is 2+2?",
+        max_new_tokens=128,
+        do_sample=False,
+    )
+
+    assert payload["model"] == "Qwen/Qwen3-8B"
+    assert payload["messages"] == [{"role": "user", "content": "What is 2+2?"}]
+    assert payload["max_tokens"] == 128
+    assert payload["temperature"] == 0.0
+
+
+def test_evaluate_one_keeps_full_generated_text(monkeypatch):
+    from src.cli import run_baseline_single_model as single_model
+
+    long_text = "x" * 800
+
+    class DummySession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(single_model.requests, "Session", lambda: DummySession())
+    monkeypatch.setattr(
+        single_model,
+        "request_completion",
+        lambda session, base_url, api_key, payload: {
+            "choices": [{"message": {"content": long_text}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": 123},
+        },
+    )
+    monkeypatch.setattr(single_model, "extract_answer", lambda text, task_type: "3")
+
+    result = single_model.evaluate_one(
+        index=0,
+        sample={"question": "q", "answer": "3"},
+        model_name="Qwen/Qwen3-8B",
+        max_new_tokens=2048,
+        do_sample=False,
+        base_url="http://127.0.0.1:8000",
+        api_key="EMPTY",
+    )
+
+    assert result["generated_text"] == long_text
+    assert result["generated_text_preview"] == long_text[:500]
+
+
+def test_run_single_model_baseline_reports_normal_stop_count(monkeypatch):
+    from src.cli import run_baseline_single_model as single_model
+
+    monkeypatch.setattr(
+        single_model,
+        "create_dataset",
+        lambda task, split, max_samples: [
+            {"question": "q1", "answer": "1"},
+            {"question": "q2", "answer": "2"},
+        ],
+    )
+    monkeypatch.setattr(
+        single_model,
+        "evaluate_one",
+        lambda **kwargs: {
+            "index": kwargs["index"],
+            "question": kwargs["sample"]["question"],
+            "gold": kwargs["sample"]["answer"],
+            "prediction": kwargs["sample"]["answer"],
+            "generated_text": "ok",
+            "generated_text_preview": "ok",
+            "generation": {"finish_reason": "stop" if kwargs["index"] == 0 else "length"},
+            "correct": True,
+        },
+    )
+
+    result = single_model.run_single_model_baseline(
+        model_name="Qwen/Qwen3-8B",
+        max_samples=2,
+        max_new_tokens=128,
+        do_sample=False,
+        worker_count=2,
+        base_url="http://127.0.0.1:8000",
+        api_key="EMPTY",
+    )
+
+    assert result["metrics"]["normal_stop_count"] == 1
+    assert result["metrics"]["normal_stop_rate"] == 50.0
 
 
 def test_infer_finish_reason_eos():

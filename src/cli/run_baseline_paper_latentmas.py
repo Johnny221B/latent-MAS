@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+import torch
 import torch.distributed as dist
 
 
@@ -70,6 +71,10 @@ def main():
     sample_tag = str(args.max_samples)
     output_path = Path(args.output) if args.output else output_dir / f"paper_latentmas_{slug}_{sample_tag}.json"
     shard_output_path = output_dir / f".paper_latentmas_{slug}_{sample_tag}_rank{rank}.json"
+    output_path = output_path.resolve()
+    shard_output_path = shard_output_path.resolve()
+    device_count = max(torch.cuda.device_count(), 1) if torch.cuda.is_available() else 0
+    device_arg = f"cuda:{rank % device_count}" if device_count else "cpu"
 
     cmd = [
         sys.executable,
@@ -88,6 +93,8 @@ def main():
         str(args.latent_steps),
         "--max_new_tokens",
         str(args.max_new_tokens),
+        "--device",
+        device_arg,
         "--shard_rank",
         str(rank),
         "--shard_world_size",
@@ -103,9 +110,9 @@ def main():
         text=True,
         capture_output=True,
     )
-    sys.stdout.write(proc.stdout)
-    sys.stderr.write(proc.stderr)
     if proc.returncode != 0:
+        sys.stdout.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
         raise SystemExit(proc.returncode)
 
     payload = json.loads(shard_output_path.read_text())
