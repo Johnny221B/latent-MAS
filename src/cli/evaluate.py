@@ -93,7 +93,7 @@ def gather_sharded_objects(local_obj, rank: int, world_size: int):
 
 def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = None):
     config = load_config(config_path)
-    generation_max_new_tokens = 256
+    generation_max_new_tokens = 2048
     device, rank, world_size, is_dist = setup_eval_distributed()
     if is_main_process(rank):
         print(f"Device: {device}")
@@ -160,7 +160,7 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
             # Tokenize question
             tokenized = system.base_model.tokenize(
                 batch["questions"],
-                max_length=config["training"].get("max_seq_len", 256),
+                max_length=config["training"].get("max_seq_len", 2048),
             )
             task_ids = tokenized["input_ids"].to(device)
             task_mask = tokenized["attention_mask"].to(device)
@@ -286,7 +286,7 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
         for idx, batch in enumerate(dataloader):
             tokenized = system.base_model.tokenize(
                 batch["questions"],
-                max_length=config["training"].get("max_seq_len", 256),
+                max_length=config["training"].get("max_seq_len", 2048),
             )
             task_ids = tokenized["input_ids"].to(device)
             task_mask = tokenized["attention_mask"].to(device)

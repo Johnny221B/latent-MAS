@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--max-samples", type=int, default=16)
     parser.add_argument("--prompt", choices=["sequential", "hierarchical"], default="sequential")
     parser.add_argument("--latent-steps", type=int, default=10)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--output-dir", default="outputs/baselines")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()

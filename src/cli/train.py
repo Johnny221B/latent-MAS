@@ -103,7 +103,7 @@ def train(config_path: str, max_samples: int | None = None):
             # ── Tokenize answer ──
             answer_tokenized = system.base_model.tokenize(
                 batch["answers"],
-                max_length=128,
+                max_length=2048,
             )
             answer_ids = answer_tokenized["input_ids"].to(device)
             answer_mask = answer_tokenized["attention_mask"].to(device)

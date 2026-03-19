@@ -197,14 +197,14 @@ def train(config_path: str, max_samples: int | None = None):
             # ── Tokenize ──
             tokenized = system.base_model.tokenize(
                 batch["questions"],
-                max_length=training_cfg.get("max_seq_len", 256),
+                max_length=training_cfg.get("max_seq_len", 2048),
             )
             task_token_ids = tokenized["input_ids"].to(device)
             task_attention_mask = tokenized["attention_mask"].to(device)
 
             answer_tokenized = system.base_model.tokenize(
                 batch["answers"],
-                max_length=128,
+                max_length=2048,
             )
             answer_ids = answer_tokenized["input_ids"].to(device)
             answer_mask = answer_tokenized["attention_mask"].to(device)

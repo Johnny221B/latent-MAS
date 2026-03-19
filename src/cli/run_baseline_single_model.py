@@ -86,7 +86,7 @@ def gather_sharded_objects(local_obj, world_size: int):
 def run_single_model_baseline(
     model_name: str,
     max_samples: int | None = None,
-    max_new_tokens: int = 256,
+    max_new_tokens: int = 2048,
     do_sample: bool = False,
     batch_size: int = 1,
 ) -> dict:
@@ -109,7 +109,7 @@ def run_single_model_baseline(
 
     with torch.no_grad():
         for batch in dataloader:
-            tokenized = model.tokenize(batch["questions"], max_length=256)
+            tokenized = model.tokenize(batch["questions"], max_length=2048)
             task_ids = tokenized["input_ids"].to(device)
             task_mask = tokenized["attention_mask"].to(device)
 
@@ -213,7 +213,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--max-samples", type=int, default=16)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--do-sample", action="store_true")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--output-dir", default="outputs/baselines")
