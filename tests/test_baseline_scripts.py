@@ -72,3 +72,41 @@ def test_infer_finish_reason_eos():
 
 def test_infer_finish_reason_max_new_tokens():
     assert Agent._infer_finish_reason([10, 11, 12, 13], eos_token_id=2, max_new_tokens=4) == "max_new_tokens"
+
+
+def test_build_chat_prompt_text_uses_system_and_user_messages():
+    class DummyTokenizer:
+        def __init__(self):
+            self.calls = []
+
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt, enable_thinking):
+            self.calls.append(
+                {
+                    "messages": messages,
+                    "tokenize": tokenize,
+                    "add_generation_prompt": add_generation_prompt,
+                    "enable_thinking": enable_thinking,
+                }
+            )
+            return "agent-chat-prompt"
+
+    tokenizer = DummyTokenizer()
+    prompt = Agent.build_chat_prompt_text(
+        tokenizer=tokenizer,
+        question_text="Solve 2+2.",
+        system_prompt="You are a careful math solver.",
+        enable_thinking=True,
+    )
+
+    assert prompt == "agent-chat-prompt"
+    assert tokenizer.calls == [
+        {
+            "messages": [
+                {"role": "system", "content": "You are a careful math solver."},
+                {"role": "user", "content": "Solve 2+2."},
+            ],
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "enable_thinking": True,
+        }
+    ]

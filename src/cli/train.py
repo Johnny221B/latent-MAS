@@ -19,7 +19,7 @@ from torch.optim import AdamW
 
 from src.utils.config import load_config
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
-from src.utils.training import validate_min_samples_for_batches
+from src.utils.training import compute_grad_norm, validate_min_samples_for_batches
 from src.pipeline.multi_agent_system import MultiAgentSystem
 from data.dataset import create_dataset
 
@@ -92,6 +92,9 @@ def train(config_path: str, max_samples: int | None = None):
         epoch_loss = 0.0
 
         for batch_idx, batch in enumerate(dataloader):
+            comp_grad_norm = None
+            adj_grad_norm = None
+
             # ── Tokenize question ──
             tokenized = system.base_model.tokenize(
                 batch["questions"],
@@ -123,24 +126,37 @@ def train(config_path: str, max_samples: int | None = None):
             loss.backward()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
+                comp_grad_norm = compute_grad_norm(system.compressor.parameters())
+                adj_grad_norm = compute_grad_norm([system.adjacency.logits])
                 torch.nn.utils.clip_grad_norm_(system.get_trainable_params(), 1.0)
                 optimizer.step()
-                optimizer.zero_grad()
                 global_step += 1
+                log_wandb(
+                    wandb_run,
+                    {
+                        "train/global_step": global_step,
+                        "train/loss": output["loss"].item(),
+                        "train/task_loss": output["task_loss"].item(),
+                        "train/graph_loss": output["graph_loss"].item(),
+                        "train/graph_loss_add": output["graph_loss_add"].item(),
+                        "train/graph_loss_drop": output["graph_loss_drop"].item(),
+                        "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
+                        "train/comp_grad": comp_grad_norm,
+                        "train/adj_grad": adj_grad_norm,
+                        "train/epoch": epoch + 1,
+                        "train/batch": batch_idx + 1,
+                    },
+                    step=global_step,
+                )
+                optimizer.zero_grad()
 
             epoch_loss += output["loss"].item()
 
             # ── Logging ──
             if (batch_idx + 1) % log_interval == 0:
                 avg_loss = epoch_loss / (batch_idx + 1)
-
-                # Monitor gradient norms per component
-                comp_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    system.compressor.parameters(), float('inf')
-                )
-                adj_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    [system.adjacency.logits], float('inf')
-                )
+                display_comp_grad = comp_grad_norm if comp_grad_norm is not None else compute_grad_norm(system.compressor.parameters())
+                display_adj_grad = adj_grad_norm if adj_grad_norm is not None else compute_grad_norm([system.adjacency.logits])
 
                 print(
                     f"Epoch {epoch+1}/{training_cfg['epochs']} | "
@@ -149,24 +165,8 @@ def train(config_path: str, max_samples: int | None = None):
                     f"Loss: {output['loss'].item():.4f} (avg: {avg_loss:.4f}) | "
                     f"Task: {output['task_loss'].item():.4f} | "
                     f"Graph: {output['graph_loss'].item():.4f} | "
-                    f"Comp∇: {comp_grad_norm:.6f} | "
-                    f"Adj∇: {adj_grad_norm:.6f}"
-                )
-                log_wandb(
-                    wandb_run,
-                    {
-                        "train/loss": output["loss"].item(),
-                        "train/task_loss": output["task_loss"].item(),
-                        "train/graph_loss": output["graph_loss"].item(),
-                        "train/graph_loss_add": output["graph_loss_add"].item(),
-                        "train/graph_loss_drop": output["graph_loss_drop"].item(),
-                        "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
-                        "train/comp_grad": float(comp_grad_norm),
-                        "train/adj_grad": float(adj_grad_norm),
-                        "train/epoch": epoch + 1,
-                        "train/batch": batch_idx + 1,
-                    },
-                    step=global_step,
+                    f"Comp∇: {display_comp_grad:.6f} | "
+                    f"Adj∇: {display_adj_grad:.6f}"
                 )
 
             # ── Save checkpoint ──

@@ -121,6 +121,9 @@ class MultiAgentSystem(nn.Module):
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
         max_new_tokens: int = 256,
+        inference_mode: str = "legacy_plain_with_prefix",
+        use_terminal_prefix: bool = True,
+        do_sample: bool = True,
     ) -> dict:
         """Full forward pass.
 
@@ -146,6 +149,9 @@ class MultiAgentSystem(nn.Module):
             answer_ids=answer_ids,
             answer_mask=answer_mask,
             max_new_tokens=max_new_tokens,
+            inference_mode=inference_mode,
+            use_terminal_prefix=use_terminal_prefix,
+            do_sample=do_sample,
         )
 
         result = {"adjacency": A}

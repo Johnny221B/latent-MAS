@@ -132,6 +132,10 @@ def evaluate(
     checkpoint_path: str,
     max_samples: int | None = None,
     max_new_tokens: int = 2048,
+    inference_mode: str = "chat_with_prefix",
+    use_terminal_prefix: bool = True,
+    run_baseline: bool = False,
+    do_sample: bool = False,
 ):
     config = load_config(config_path)
     generation_max_new_tokens = max_new_tokens
@@ -218,6 +222,9 @@ def evaluate(
                 task_token_ids=task_ids,
                 task_attention_mask=task_mask,
                 max_new_tokens=generation_max_new_tokens,
+                inference_mode=inference_mode,
+                use_terminal_prefix=use_terminal_prefix,
+                do_sample=do_sample,
             )
 
             generated_text = output["generated_text"]
@@ -267,6 +274,9 @@ def evaluate(
                     "checkpoint_path": checkpoint_path,
                     "max_samples": max_samples,
                     "generation_max_new_tokens": generation_max_new_tokens,
+                    "inference_mode": inference_mode,
+                    "use_terminal_prefix": use_terminal_prefix,
+                    "do_sample": do_sample,
                     "config": copy.deepcopy(config),
                     "rank": rank,
                 },
@@ -345,12 +355,21 @@ def evaluate(
                 "checkpoint_path": checkpoint_path,
                 "max_samples": max_samples,
                 "generation_max_new_tokens": generation_max_new_tokens,
+                "inference_mode": inference_mode,
+                "use_terminal_prefix": use_terminal_prefix,
+                "do_sample": do_sample,
                 "config": copy.deepcopy(config),
             },
             "world_size": world_size,
             "samples": all_results,
         }, f, indent=2, ensure_ascii=False)
     print(f"  Results saved: {eval_path}")
+
+    if not run_baseline:
+        if is_dist:
+            dist.barrier()
+        cleanup_eval_distributed()
+        return
 
     # ── Also run baseline (no multi-agent, just the model) ──
     print(f"\n{'='*60}")
@@ -497,5 +516,31 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument(
+        "--inference-mode",
+        type=str,
+        default="chat_with_prefix",
+        choices=["chat_with_prefix", "legacy_plain_with_prefix"],
+    )
+    parser.add_argument(
+        "--no-terminal-prefix",
+        action="store_true",
+        help="Disable upstream latent prefix for the terminal agent during eval.",
+    )
+    parser.add_argument(
+        "--run-baseline",
+        action="store_true",
+        help="Also run the embedded single-model baseline after ours eval.",
+    )
+    parser.add_argument("--do-sample", action="store_true")
     args = parser.parse_args()
-    evaluate(args.config, args.checkpoint, args.max_samples, args.max_new_tokens)
+    evaluate(
+        args.config,
+        args.checkpoint,
+        args.max_samples,
+        args.max_new_tokens,
+        inference_mode=args.inference_mode,
+        use_terminal_prefix=not args.no_terminal_prefix,
+        run_baseline=args.run_baseline,
+        do_sample=args.do_sample,
+    )

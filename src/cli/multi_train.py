@@ -30,7 +30,7 @@ from torch.optim import AdamW
 from src.utils.config import load_config
 from src.utils.output_paths import build_timestamped_output_dir
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
-from src.utils.training import validate_min_samples_for_batches
+from src.utils.training import compute_grad_norm, validate_min_samples_for_batches
 from src.pipeline.multi_agent_system import MultiAgentSystem
 from data.dataset import create_dataset
 
@@ -189,6 +189,9 @@ def train(config_path: str, max_samples: int | None = None):
 
         for batch_idx, batch in enumerate(dataloader):
             t0 = time.time()
+            comp_grad = None
+            adj_grad = None
+            mem = None
 
             # ── Tokenize ──
             tokenized = system.base_model.tokenize(
@@ -228,57 +231,56 @@ def train(config_path: str, max_samples: int | None = None):
                 dist.all_reduce(adjacency.logits.grad, op=dist.ReduceOp.AVG)
 
             if (batch_idx + 1) % grad_accum_steps == 0:
+                comp_grad = compute_grad_norm(compressor.parameters())
+                adj_grad = compute_grad_norm([adjacency.logits])
+                mem = torch.cuda.max_memory_allocated(device) / 1024**3
                 torch.nn.utils.clip_grad_norm_(system.get_trainable_params(), 1.0)
                 optimizer.step()
-                optimizer.zero_grad()
                 global_step += 1
+                if is_main_process():
+                    log_wandb(
+                        wandb_run,
+                        {
+                            "train/global_step": global_step,
+                            "train/loss": output["loss"].item(),
+                            "train/task_loss": output["task_loss"].item(),
+                            "train/graph_loss": output["graph_loss"].item(),
+                            "train/graph_loss_add": output["graph_loss_add"].item(),
+                            "train/graph_loss_drop": output["graph_loss_drop"].item(),
+                            "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
+                            "train/comp_grad": comp_grad,
+                            "train/adj_grad": adj_grad,
+                            "train/forward_seconds": t2 - t1,
+                            "train/backward_seconds": t3 - t2,
+                            "train/tokenize_seconds": t1 - t0,
+                            "train/max_memory_gb": mem,
+                            "train/epoch": epoch + 1,
+                            "train/batch": batch_idx + 1,
+                        },
+                        step=global_step,
+                    )
+                optimizer.zero_grad()
 
             epoch_loss += output["loss"].item()
             epoch_batches += 1
 
             # ── Logging (main process only) ──
             if is_main_process() and (batch_idx + 1) % log_interval == 0:
-                comp_grad = sum(
-                    p.grad.norm().item() for p in compressor.parameters()
-                    if p.grad is not None
-                )
-                adj_grad = (
-                    adjacency.logits.grad.norm().item()
-                    if adjacency.logits.grad is not None else 0.0
-                )
-                mem = torch.cuda.max_memory_allocated(device) / 1024**3
+                display_comp_grad = comp_grad if comp_grad is not None else compute_grad_norm(compressor.parameters())
+                display_adj_grad = adj_grad if adj_grad is not None else compute_grad_norm([adjacency.logits])
+                display_mem = mem if mem is not None else torch.cuda.max_memory_allocated(device) / 1024**3
 
                 print(
                     f"  E{epoch+1} B{batch_idx+1}/{len(dataloader)} | "
                     f"Loss:{output['loss'].item():.4f} "
                     f"Task:{output['task_loss'].item():.4f} "
                     f"Graph:{output['graph_loss'].item():.4f} | "
-                    f"C∇:{comp_grad:.6f} A∇:{adj_grad:.6f} | "
+                    f"C∇:{display_comp_grad:.6f} A∇:{display_adj_grad:.6f} | "
                     f"tok:{t1-t0:.1f}s fwd:{t2-t1:.1f}s bwd:{t3-t2:.1f}s | "
-                    f"mem:{mem:.1f}GB"
-                )
-                log_wandb(
-                    wandb_run,
-                    {
-                        "train/loss": output["loss"].item(),
-                        "train/task_loss": output["task_loss"].item(),
-                        "train/graph_loss": output["graph_loss"].item(),
-                        "train/graph_loss_add": output["graph_loss_add"].item(),
-                        "train/graph_loss_drop": output["graph_loss_drop"].item(),
-                        "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
-                        "train/comp_grad": comp_grad,
-                        "train/adj_grad": adj_grad,
-                        "train/forward_seconds": t2 - t1,
-                        "train/backward_seconds": t3 - t2,
-                        "train/tokenize_seconds": t1 - t0,
-                        "train/max_memory_gb": mem,
-                        "train/epoch": epoch + 1,
-                        "train/batch": batch_idx + 1,
-                    },
-                    step=global_step,
+                    f"mem:{display_mem:.1f}GB"
                 )
                 
-                        # ── Record loss ──
+            # ── Record loss ──
             if is_main_process():
                 loss_log.append({
                     "epoch": epoch + 1,
@@ -287,8 +289,8 @@ def train(config_path: str, max_samples: int | None = None):
                     "loss": output["loss"].item(),
                     "task_loss": output["task_loss"].item(),
                     "graph_loss": output["graph_loss"].item(),
-                    "comp_grad": comp_grad if (batch_idx + 1) % log_interval == 0 else None,
-                    "adj_grad": adj_grad if (batch_idx + 1) % log_interval == 0 else None,
+                    "comp_grad": comp_grad,
+                    "adj_grad": adj_grad,
                 })
 
             # ── Checkpoint (main process only) ──

@@ -1,5 +1,9 @@
 """Training-time validation helpers."""
 
+import math
+
+import torch
+
 
 def validate_min_samples_for_batches(
     dataset_size: int,
@@ -19,3 +23,13 @@ def validate_min_samples_for_batches(
             f"world_size={world_size}, drop_last={drop_last}. "
             f"Need at least {required_samples} samples."
         )
+
+
+def compute_grad_norm(parameters) -> float:
+    total = 0.0
+    for param in parameters:
+        if param.grad is None:
+            continue
+        grad_norm = param.grad.detach().norm(2).item()
+        total += grad_norm * grad_norm
+    return math.sqrt(total)

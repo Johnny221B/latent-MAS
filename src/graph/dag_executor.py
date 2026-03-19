@@ -28,6 +28,9 @@ class DAGExecutor:
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
         max_new_tokens: int = 256,
+        inference_mode: str = "legacy_plain_with_prefix",
+        use_terminal_prefix: bool = True,
+        do_sample: bool = True,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -92,6 +95,9 @@ class DAGExecutor:
                         upstream_prefix=upstream_prefix,
                         max_new_tokens=max_new_tokens,
                         return_metadata=True,
+                        inference_mode=inference_mode,
+                        use_upstream_prefix=use_terminal_prefix,
+                        do_sample=do_sample,
                     )
 
         if training:

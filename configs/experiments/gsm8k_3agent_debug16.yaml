@@ -7,30 +7,30 @@ graph:
   roles_dir: "configs/roles"
 
 compressor:
-  num_queries: 16        # Lp: output prefix length
-  num_heads: 8           # attention heads in cross-attn
+  num_queries: 16
+  num_heads: 8
   dropout: 0.1
 
 training:
   task: "gsm8k"
-  batch_size: 32
+  batch_size: 8
   lr: 0.0005
   weight_decay: 0.01
   epochs: 1
   max_seq_len: 2048
-  lambda_add: 0.1       # penalty for adding edges not in prior
-  lambda_drop: 0.005      # penalty for dropping edges in prior
-  lambda_sparse: 0.005    # penalty for sparsity of edges
+  lambda_add: 0.1
+  lambda_drop: 0.005
+  lambda_sparse: 0.005
   gradient_accumulation_steps: 1
   log_interval: 1
   save_interval: 1000
 
 reasoning:
-  steps_per_agent: 25      # total generation tokens per agent
-  compress_last_k: 25       # only compress last k hidden states
+  steps_per_agent: 25
+  compress_last_k: 25
 
 output:
-  dir: "outputs/gsm8k_qwen3-8b"
+  dir: "outputs/gsm8k_qwen3-8b_debug16"
   log_dir: "logs"
 
 report:

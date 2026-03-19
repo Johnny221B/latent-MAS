@@ -82,6 +82,74 @@ class Agent:
         return torch.cat([role_ids, task_token_ids], dim=1)
 
     @staticmethod
+    def build_chat_prompt_text(
+        tokenizer,
+        question_text: str,
+        system_prompt: str | None = None,
+        enable_thinking: bool = True,
+    ) -> str:
+        messages = []
+        if system_prompt and system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt.strip()})
+        messages.append({"role": "user", "content": question_text})
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+
+    def _build_generation_inputs(
+        self,
+        task_token_ids: torch.LongTensor,
+        task_attention_mask: torch.Tensor | None = None,
+        inference_mode: str = "legacy_plain_with_prefix",
+    ) -> tuple[torch.LongTensor, torch.Tensor | None]:
+        if inference_mode == "legacy_plain_with_prefix":
+            input_ids = self.build_input_ids(task_token_ids)
+            if task_attention_mask is not None:
+                role_mask = torch.ones(
+                    task_attention_mask.shape[0],
+                    self._get_role_token_ids().shape[1],
+                    device=task_attention_mask.device,
+                    dtype=task_attention_mask.dtype,
+                )
+                attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
+            else:
+                attention_mask = None
+            return input_ids, attention_mask
+
+        if inference_mode != "chat_with_prefix":
+            raise ValueError(f"Unsupported inference_mode: {inference_mode}")
+
+        question_texts = self.base_model.tokenizer.batch_decode(
+            task_token_ids.detach().cpu(),
+            skip_special_tokens=True,
+        )
+        prompts = [
+            self.build_chat_prompt_text(
+                tokenizer=self.base_model.tokenizer,
+                question_text=question_text,
+                system_prompt=self.system_prompt,
+                enable_thinking=True,
+            )
+            for question_text in question_texts
+        ]
+        tokenized = self.base_model.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.max_seq_len,
+            add_special_tokens=False,
+        )
+        input_ids = tokenized["input_ids"].to(self.device)
+        attention_mask = tokenized.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device)
+        return input_ids, attention_mask
+
+    @staticmethod
     def _infer_finish_reason(
         generated_ids: list[int],
         eos_token_id: int | None,
@@ -222,20 +290,17 @@ class Agent:
         top_p: float = 0.95,
         do_sample: bool = True,
         return_metadata: bool = False,
+        inference_mode: str = "legacy_plain_with_prefix",
+        use_upstream_prefix: bool = True,
     ) -> str | dict:
-        input_ids = self.build_input_ids(task_token_ids)  # [1, role_len + task_len]
+        input_ids, attention_mask = self._build_generation_inputs(
+            task_token_ids=task_token_ids,
+            task_attention_mask=task_attention_mask,
+            inference_mode=inference_mode,
+        )
+        if not use_upstream_prefix:
+            upstream_prefix = None
         eos_token_id = self.base_model.tokenizer.eos_token_id
-
-        if task_attention_mask is not None:
-            role_mask = torch.ones(
-                task_attention_mask.shape[0],
-                self._get_role_token_ids().shape[1],
-                device=task_attention_mask.device,
-                dtype=task_attention_mask.dtype,
-            )
-            attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
-        else:
-            attention_mask = None
 
         # If we have upstream prefix, we need to:
         # 1. Convert input_ids to embeddings
@@ -316,20 +381,26 @@ class Agent:
                     "finish_reason": finish_reason,
                     "generated_token_count": len(generated_ids),
                     "stopped_early": finish_reason != "max_new_tokens",
+                    "inference_mode": inference_mode,
+                    "used_upstream_prefix": use_upstream_prefix,
                 }
             return generated_text
 
         else:
             # No prefix — just use model.generate directly
+            generate_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": do_sample,
+                "pad_token_id": self.base_model.tokenizer.pad_token_id,
+                "return_dict_in_generate": True,
+            }
+            if do_sample:
+                generate_kwargs["temperature"] = temperature
+                generate_kwargs["top_p"] = top_p
             gen_out = self.base_model.model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                pad_token_id=self.base_model.tokenizer.pad_token_id,
-                return_dict_in_generate=True,
+                **generate_kwargs,
             )
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
             generated_token_ids = sequences[0][input_ids.shape[1]:].tolist()
@@ -347,6 +418,8 @@ class Agent:
                     "finish_reason": finish_reason,
                     "generated_token_count": len(generated_token_ids),
                     "stopped_early": finish_reason != "max_new_tokens",
+                    "inference_mode": inference_mode,
+                    "used_upstream_prefix": use_upstream_prefix,
                 }
             return generated_text
 

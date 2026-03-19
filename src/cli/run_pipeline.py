@@ -53,6 +53,15 @@ def main():
     ours_p.add_argument("--checkpoint", required=True)
     ours_p.add_argument("--max-samples", type=int, default=None)
     ours_p.add_argument("--max-new-tokens", type=int, default=2048)
+    ours_p.add_argument(
+        "--inference-mode",
+        type=str,
+        default="chat_with_prefix",
+        choices=["chat_with_prefix", "legacy_plain_with_prefix"],
+    )
+    ours_p.add_argument("--no-terminal-prefix", action="store_true")
+    ours_p.add_argument("--do-sample", action="store_true")
+    ours_p.add_argument("--run-baseline", action="store_true")
     ours_p.add_argument("--nproc-per-node", type=int, default=1)
 
     single_p = subparsers.add_parser("eval-single")
@@ -91,9 +100,16 @@ def main():
             "--config", args.config,
             "--checkpoint", args.checkpoint,
             "--max-new-tokens", str(args.max_new_tokens),
+            "--inference-mode", args.inference_mode,
         ]
         if args.max_samples is not None:
             cmd.extend(["--max_samples", str(args.max_samples)])
+        if args.no_terminal_prefix:
+            cmd.append("--no-terminal-prefix")
+        if args.do_sample:
+            cmd.append("--do-sample")
+        if args.run_baseline:
+            cmd.append("--run-baseline")
         run_command(cmd, env)
         return
 
