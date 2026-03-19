@@ -14,22 +14,22 @@ compressor:
 
 training:
   task: "gsm8k"
-  batch_size: 4
-  lr: 1e-4
+  batch_size: 8
+  lr: 0.0005
   weight_decay: 0.01
-  epochs: 10
-  max_seq_len: 512
+  epochs: 50
+  max_seq_len: 256
   lambda_add: 0.1       # penalty for adding edges not in prior
-  lambda_drop: 0.5      # penalty for dropping edges in prior
-  lambda_sparse: 0.1    # penalty for sparsity of edges
-  gradient_accumulation_steps: 4
+  lambda_drop: 0.005      # penalty for dropping edges in prior
+  lambda_sparse: 0.005    # penalty for sparsity of edges
+  gradient_accumulation_steps: 1
   log_interval: 50
-  save_interval: 500
+  save_interval: 1000
 
 reasoning:
-  steps_per_agent: 256      # total generation tokens per agent
-  compress_last_k: 40       # only compress last k hidden states
+  steps_per_agent: 25      # total generation tokens per agent
+  compress_last_k: 25       # only compress last k hidden states
 
 output:
-  dir: "outputs"
+  dir: "outputs/gsm8k_qwen3-0.6b"
   log_dir: "logs"

@@ -124,13 +124,24 @@ def train(config_path: str, max_samples: int | None = None):
             # ── Logging ──
             if (batch_idx + 1) % log_interval == 0:
                 avg_loss = epoch_loss / (batch_idx + 1)
+
+                # Monitor gradient norms per component
+                comp_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    system.compressor.parameters(), float('inf')
+                )
+                adj_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [system.adjacency.logits], float('inf')
+                )
+
                 print(
                     f"Epoch {epoch+1}/{training_cfg['epochs']} | "
                     f"Step {global_step} | "
                     f"Batch {batch_idx+1}/{len(dataloader)} | "
                     f"Loss: {output['loss'].item():.4f} (avg: {avg_loss:.4f}) | "
                     f"Task: {output['task_loss'].item():.4f} | "
-                    f"Graph: {output['graph_loss'].item():.4f}"
+                    f"Graph: {output['graph_loss'].item():.4f} | "
+                    f"Comp∇: {comp_grad_norm:.6f} | "
+                    f"Adj∇: {adj_grad_norm:.6f}"
                 )
 
             # ── Save checkpoint ──

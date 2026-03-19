@@ -112,13 +112,18 @@ class Agent:
             else:
                 attention_mask = None
 
-            # Latent reasoning in continuous space
-            output = self.base_model.latent_reasoning(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                prefix_embeds=upstream_prefix,
-                num_latent_steps=self.reasoning_steps,
-            )
+            # Latent reasoning in continuous space (no grad needed — frozen model)
+            with torch.no_grad():
+                output = self.base_model.latent_reasoning(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    prefix_embeds=upstream_prefix,
+                    num_latent_steps=self.reasoning_steps,
+                )
+
+            # Detach trajectory but keep it as a regular tensor for compressor
+            # Compressor will create its own computation graph from here
+            output["hidden_trajectory"] = output["hidden_trajectory"].detach()
 
             trajectory = output["hidden_trajectory"]  # [B, m, D]
             B, m, D = trajectory.shape

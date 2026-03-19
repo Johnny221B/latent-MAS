@@ -28,6 +28,7 @@ class LatentCompressor(nn.Module):
         num_queries: int = 16,
         num_heads: int = 8,
         dropout: float = 0.1,
+        target_norm: float | None = None,
     ):
         """
         Args:
@@ -60,6 +61,8 @@ class LatentCompressor(nn.Module):
             nn.Linear(hidden_dim * 4, hidden_dim),
             nn.Dropout(dropout),
         )
+        
+        self.target_norm = target_norm
 
     def forward(
         self,
@@ -102,6 +105,15 @@ class LatentCompressor(nn.Module):
 
         # FFN + Residual + LayerNorm
         x = self.norm2(x + self.ffn(x))
+
+        # Scale output to match input embedding norm
+        # Without this, prefix norm (~100) >> embedding norm (~1-2),
+        # causing the frozen LLM to behave erratically.
+        if self.target_norm is not None:
+            x_norm = x.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            x = x * (self.target_norm / x_norm)
+
+        return x  # [B, Lp, D]
 
         return x  # [B, Lp, D]
 

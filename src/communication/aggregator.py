@@ -34,20 +34,15 @@ class MessageAggregator:
                 continue
 
             weight = adjacency[i, j]
-
-            if weight.item() < 1e-6:
-                continue
-
             incoming.append(weight * all_prefixes[i])
-            weight_sum = weight_sum + weight  # keep differentiable
+            weight_sum = weight_sum + weight  # differentiable
 
         if not incoming:
             return None
 
-        z_j = torch.stack(incoming, dim=0).sum(dim=0)  # [B, Lp, D]
+        z_j = torch.stack(incoming, dim=0).sum(dim=0)
 
-        # Normalize: divide by sum of weights to keep prefix scale stable
-        if weight_sum > 1e-8:
-            z_j = z_j / weight_sum
+        # Normalize so incoming weights sum to 1
+        z_j = z_j / (weight_sum + 1e-8)
 
         return z_j

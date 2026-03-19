@@ -84,12 +84,19 @@ class MultiAgentSystem(nn.Module):
             self.agents.append(agent)
 
         # ── Trainable: Compressor ──
+        # ── Compute target norm from input embeddings ──
+        with torch.no_grad():
+            embed_weight = self.base_model.model.get_input_embeddings().weight
+            target_norm = embed_weight.norm(dim=1).mean().item()
+
+        # ── Trainable: Compressor ──
         compressor_cfg = config.get("compressor", {})
         self.compressor = LatentCompressor(
             hidden_dim=hidden_dim,
             num_queries=compressor_cfg.get("num_queries", 16),
             num_heads=compressor_cfg.get("num_heads", 8),
             dropout=compressor_cfg.get("dropout", 0.1),
+            target_norm=target_norm,
         )
 
         # ── Trainable: Adjacency ──
@@ -99,8 +106,7 @@ class MultiAgentSystem(nn.Module):
         self.executor = DAGExecutor(aggregator=MessageAggregator())
 
         # ── Losses ──
-        self.task_loss_fn = TaskLoss()
-        self.loss_mode = training_cfg.get("loss_mode", "ce")  # "ce" or "reward"
+        self.task_loss_fn = TaskLoss()  # "ce" or "reward"
         training_cfg = config.get("training", {})
         self.graph_loss_fn = GraphLoss(
             lambda_add=training_cfg.get("lambda_add", 0.1),
