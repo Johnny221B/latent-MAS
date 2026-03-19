@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim import AdamW
 
 from src.utils.config import load_config
+from src.utils.output_paths import build_timestamped_output_dir
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
 from src.utils.training import validate_min_samples_for_batches
 from src.pipeline.multi_agent_system import MultiAgentSystem
@@ -158,17 +159,12 @@ def train(config_path: str, max_samples: int | None = None):
     grad_accum_steps = training_cfg.get("gradient_accumulation_steps", 1)
     log_interval = training_cfg.get("log_interval", 1)
     save_interval = training_cfg.get("save_interval", 500)
-    output_dir = Path(config.get("output", {}).get("dir", "outputs"))
-    if is_main_process():
-        output_dir.mkdir(parents=True, exist_ok=True)
-
     compressor = system.compressor.module if is_ddp else system.compressor
     adjacency = system.adjacency
     
     # ── Output directory with timestamp ──
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_output_dir = config.get("output", {}).get("dir", "outputs/run")
-    output_dir = Path(f"{base_output_dir}_{timestamp}")
+    output_dir = build_timestamped_output_dir(base_output_dir)
     if is_main_process():
         output_dir.mkdir(parents=True, exist_ok=True)
         # Save config for reproducibility
