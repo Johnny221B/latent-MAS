@@ -35,7 +35,6 @@ def build_agent_sample_log(
     question: str,
     gold: str,
     prediction: str,
-    generated_text: str,
     generation: dict,
     correct: bool,
     agent_logs: list[dict],
@@ -44,7 +43,6 @@ def build_agent_sample_log(
         "question": question,
         "gold": gold,
         "prediction": prediction,
-        "generated_text": generated_text[:500],
         "generation": generation,
         "correct": correct,
         "agents": agent_logs,
@@ -177,6 +175,7 @@ def evaluate(
     run_baseline: bool = False,
     do_sample: bool = False,
     write_agent_logs: bool = True,
+    worker: int | None = None,
 ):
     config = load_config(config_path)
     generation_max_new_tokens = max_new_tokens
@@ -299,14 +298,12 @@ def evaluate(
                     "question": batch["questions"][0],
                     "gold": gold,
                     "prediction": pred,
-                    "generated_text": generated_text[:500],
                     "generation": generation,
                     "correct": is_correct,
                     "agent_log": build_agent_sample_log(
                         question=batch["questions"][0],
                         gold=gold,
                         prediction=pred,
-                        generated_text=generated_text,
                         generation=generation,
                         correct=is_correct,
                         agent_logs=agent_logs,
@@ -329,7 +326,6 @@ def evaluate(
                     "question": shard_update["question"],
                     "gold": shard_update["gold"],
                     "prediction": shard_update["prediction"],
-                    "generated_text": shard_update["generated_text"],
                     "generation": shard_update["generation"],
                     "correct": shard_update["correct"],
                 }
@@ -354,6 +350,7 @@ def evaluate(
                     "use_terminal_prefix": use_terminal_prefix,
                     "do_sample": do_sample,
                     "write_agent_logs": write_agent_logs,
+                    "worker": worker,
                     "config": copy.deepcopy(config),
                 },
                 world_size=world_size,
@@ -373,6 +370,7 @@ def evaluate(
                         "use_terminal_prefix": use_terminal_prefix,
                         "do_sample": do_sample,
                         "write_agent_logs": write_agent_logs,
+                        "worker": worker,
                     },
                     samples=agent_log_results,
                 )
@@ -388,7 +386,7 @@ def evaluate(
                 print(f"    Q: {latest['question'][:100]}...")
                 print(f"    Gold: {latest['gold']}")
                 print(f"    Pred: {latest['prediction']}")
-                print(f"    Gen:  {latest['generated_text'][:200]}")
+                print(f"    Gen:  {latest['generation'].get('generated_text', '')[:200]}")
 
     if not is_main_process(rank):
         if is_dist:
@@ -427,6 +425,7 @@ def evaluate(
             "use_terminal_prefix": use_terminal_prefix,
             "do_sample": do_sample,
             "write_agent_logs": write_agent_logs,
+            "worker": worker,
             "config": copy.deepcopy(config),
         },
         world_size=world_size,
@@ -488,7 +487,6 @@ def evaluate(
                 "question": batch["questions"][0],
                 "gold": gold,
                 "prediction": pred,
-                "generated_text": baseline_text[:500],
                 "generation": generation,
                 "correct": pred.strip() == gold.strip(),
             }
@@ -521,6 +519,7 @@ def evaluate(
                 "use_terminal_prefix": use_terminal_prefix,
                 "do_sample": do_sample,
                 "write_agent_logs": write_agent_logs,
+                "worker": worker,
                 "config": copy.deepcopy(config),
             },
             world_size=world_size,
@@ -575,6 +574,7 @@ def evaluate(
             "use_terminal_prefix": use_terminal_prefix,
             "do_sample": do_sample,
             "write_agent_logs": write_agent_logs,
+            "worker": worker,
             "config": copy.deepcopy(config),
         },
         world_size=world_size,
@@ -628,6 +628,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--do-sample", action="store_true")
     parser.add_argument("--no-agent-logs", action="store_true")
+    parser.add_argument("--worker", type=int, default=None)
     args = parser.parse_args()
     evaluate(
         args.config,
@@ -639,4 +640,5 @@ if __name__ == "__main__":
         run_baseline=args.run_baseline,
         do_sample=args.do_sample,
         write_agent_logs=not args.no_agent_logs,
+        worker=args.worker,
     )
