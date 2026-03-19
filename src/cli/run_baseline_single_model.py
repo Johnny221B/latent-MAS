@@ -31,6 +31,15 @@ def build_default_output_path(output_dir: Path, model_name: str, max_samples: in
     return output_dir / f"single_model_{slug}_{sample_tag}.json"
 
 
+def build_qwen_chat_text(tokenizer, question: str) -> str:
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": question}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+
+
 def build_generation_metadata(generated_token_ids: list[int], eos_token_id: int | None, max_new_tokens: int) -> dict:
     finish_reason = Agent._infer_finish_reason(
         generated_ids=generated_token_ids,
@@ -109,7 +118,14 @@ def run_single_model_baseline(
 
     with torch.no_grad():
         for batch in dataloader:
-            tokenized = model.tokenize(batch["questions"], max_length=2048)
+            prompts = [build_qwen_chat_text(model.tokenizer, question) for question in batch["questions"]]
+            tokenized = model.tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=2048,
+            )
             task_ids = tokenized["input_ids"].to(device)
             task_mask = tokenized["attention_mask"].to(device)
 
@@ -163,6 +179,8 @@ def run_single_model_baseline(
         },
         "parameters": {
             "model_name": model_name,
+            "prompt_format": "qwen_chat",
+            "enable_thinking": True,
             "max_samples": max_samples,
             "max_new_tokens": max_new_tokens,
             "do_sample": do_sample,
@@ -195,6 +213,8 @@ def run_single_model_baseline(
         },
         "parameters": {
             "model_name": model_name,
+            "prompt_format": "qwen_chat",
+            "enable_thinking": True,
             "max_samples": max_samples,
             "max_new_tokens": max_new_tokens,
             "do_sample": do_sample,

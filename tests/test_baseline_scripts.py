@@ -34,6 +34,38 @@ def test_default_output_path_uses_model_and_sample_count():
     assert path.name == "single_model_qwen3-8b_16.json"
 
 
+def test_build_qwen_chat_text_uses_official_chat_template():
+    from src.cli.run_baseline_single_model import build_qwen_chat_text
+
+    class DummyTokenizer:
+        def __init__(self):
+            self.calls = []
+
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt, enable_thinking):
+            self.calls.append(
+                {
+                    "messages": messages,
+                    "tokenize": tokenize,
+                    "add_generation_prompt": add_generation_prompt,
+                    "enable_thinking": enable_thinking,
+                }
+            )
+            return "formatted-prompt"
+
+    tokenizer = DummyTokenizer()
+    text = build_qwen_chat_text(tokenizer, "What is 2+2?")
+
+    assert text == "formatted-prompt"
+    assert tokenizer.calls == [
+        {
+            "messages": [{"role": "user", "content": "What is 2+2?"}],
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "enable_thinking": True,
+        }
+    ]
+
+
 def test_infer_finish_reason_eos():
     assert Agent._infer_finish_reason([10, 11, 2], eos_token_id=2, max_new_tokens=8) == "eos"
 

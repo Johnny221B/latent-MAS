@@ -1,3 +1,5 @@
 #!/bin/bash
 set -euo pipefail
-uv run --python .venv/bin/python src/cli/multi_train.py "$@"
+uv run --python .venv/bin/python src/cli/multi_train.py \
+  --config configs/experiments/gsm8k_3agent.yaml \
+  "$@"

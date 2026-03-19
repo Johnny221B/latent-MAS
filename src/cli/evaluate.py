@@ -31,6 +31,42 @@ from data.dataset import create_dataset
 from src.models.agent import Agent
 
 
+def append_jsonl_record(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def write_partial_eval_snapshot(
+    partial_path: Path,
+    method: str,
+    task: str,
+    correct: int,
+    total: int,
+    time_seconds: float,
+    parameters: dict,
+    world_size: int,
+    jsonl_path: Path,
+) -> None:
+    accuracy = correct / total * 100 if total > 0 else 0.0
+    payload = {
+        "method": method,
+        "task": task,
+        "metrics": {
+            "accuracy": accuracy,
+            "correct": correct,
+            "total": total,
+            "time_seconds": time_seconds,
+        },
+        "parameters": parameters,
+        "world_size": world_size,
+        "samples_jsonl": str(jsonl_path),
+    }
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(partial_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
 def collate_fn(batch: list[dict]) -> dict:
     return {
         "questions": [item["question"] for item in batch],
@@ -91,9 +127,14 @@ def gather_sharded_objects(local_obj, rank: int, world_size: int):
     return gathered
 
 
-def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = None):
+def evaluate(
+    config_path: str,
+    checkpoint_path: str,
+    max_samples: int | None = None,
+    max_new_tokens: int = 2048,
+):
     config = load_config(config_path)
-    generation_max_new_tokens = 2048
+    generation_max_new_tokens = max_new_tokens
     device, rank, world_size, is_dist = setup_eval_distributed()
     if is_main_process(rank):
         print(f"Device: {device}")
@@ -148,6 +189,13 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
     correct = 0
     total = 0
     results = []
+    checkpoint_dir = Path(checkpoint_path).parent
+    jsonl_path = checkpoint_dir / f"eval_samples.rank{rank}.jsonl"
+    partial_eval_path = checkpoint_dir / f"eval_results.partial.rank{rank}.json"
+    partial_baseline_path = checkpoint_dir / f"eval_results.baseline_single.partial.rank{rank}.json"
+    for path in (jsonl_path, partial_eval_path, partial_baseline_path):
+        if path.exists():
+            path.unlink()
 
     if is_main_process(rank):
         print("\nRunning evaluation...")
@@ -193,6 +241,37 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
                 "generation": generation,
                 "correct": is_correct,
             })
+            append_jsonl_record(
+                jsonl_path,
+                {
+                    "phase": "ours",
+                    "rank": rank,
+                    "question": batch["questions"][0],
+                    "gold": gold,
+                    "prediction": pred,
+                    "generated_text": generated_text[:500],
+                    "generation": generation,
+                    "correct": is_correct,
+                },
+            )
+            write_partial_eval_snapshot(
+                partial_path=partial_eval_path,
+                method="ours_trained_multi_agent",
+                task=task,
+                correct=correct,
+                total=total,
+                time_seconds=time.time() - t_start,
+                parameters={
+                    "config_path": config_path,
+                    "checkpoint_path": checkpoint_path,
+                    "max_samples": max_samples,
+                    "generation_max_new_tokens": generation_max_new_tokens,
+                    "config": copy.deepcopy(config),
+                    "rank": rank,
+                },
+                world_size=world_size,
+                jsonl_path=jsonl_path,
+            )
 
             # Print progress
             if is_main_process(rank) and ((idx + 1) % 10 == 0 or (idx + 1) == len(dataloader)):
@@ -249,7 +328,6 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
     print(f"{'='*60}")
 
     # ── Save results ──
-    checkpoint_dir = Path(checkpoint_path).parent
     eval_path = checkpoint_dir / "eval_results.json"
     with open(eval_path, "w") as f:
         json.dump({
@@ -325,6 +403,35 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
                 "generation": generation,
                 "correct": is_correct,
             })
+            append_jsonl_record(
+                jsonl_path,
+                {
+                    "phase": "baseline_single_model",
+                    "rank": rank,
+                    "question": batch["questions"][0],
+                    "gold": gold,
+                    "prediction": pred,
+                    "generated_text": baseline_text[:500],
+                    "generation": generation,
+                    "correct": is_correct,
+                },
+            )
+            write_partial_eval_snapshot(
+                partial_path=partial_baseline_path,
+                method="single_model",
+                task=task,
+                correct=baseline_correct,
+                total=baseline_total,
+                time_seconds=time.time() - t_start,
+                parameters={
+                    "generation_max_new_tokens": generation_max_new_tokens,
+                    "do_sample": False,
+                    "world_size": world_size,
+                    "rank": rank,
+                },
+                world_size=world_size,
+                jsonl_path=jsonl_path,
+            )
 
             if is_main_process(rank) and (idx + 1) % 50 == 0:
                 bacc = baseline_correct / baseline_total * 100
@@ -388,5 +495,6 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
     args = parser.parse_args()
-    evaluate(args.config, args.checkpoint, args.max_samples)
+    evaluate(args.config, args.checkpoint, args.max_samples, args.max_new_tokens)
