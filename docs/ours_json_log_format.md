@@ -57,7 +57,10 @@ outputs/gsm8k_qwen3-8b_xxx/
   "accuracy": 12.0,
   "correct": 12,
   "total": 100,
-  "time_seconds": 345.2
+  "time_seconds": 345.2,
+  "avg_sample_seconds": 3.45,
+  "avg_generated_tokens": 128.0,
+  "avg_tokens_per_second": 37.1
 }
 ```
 
@@ -75,6 +78,15 @@ outputs/gsm8k_qwen3-8b_xxx/
 - `time_seconds`
   当前评测总耗时，单位是秒。
 
+- `avg_sample_seconds`
+  平均每条样本推理耗时，单位是秒。
+
+- `avg_generated_tokens`
+  平均每条样本实际生成的 token 数。
+
+- `avg_tokens_per_second`
+  用 `generated_token_count / sample_seconds` 汇总得到的整体生成吞吐。
+
 ### `parameters` 字段
 
 当前会记录的典型字段包括：
@@ -83,6 +95,7 @@ outputs/gsm8k_qwen3-8b_xxx/
 {
   "config_path": "outputs/.../config.yaml",
   "checkpoint_path": "outputs/.../final_model.pt",
+  "split": "test",
   "max_samples": 100,
   "generation_max_new_tokens": 16384,
   "inference_mode": "chat_with_prefix",
@@ -103,7 +116,10 @@ outputs/gsm8k_qwen3-8b_xxx/
   当前使用的 checkpoint 路径。
 
 - `max_samples`
-  本次评测最多使用多少条测试样本。`-1` 或 `null` 一般表示全量。
+  本次评测最多使用多少条样本。`-1` 或 `null` 一般表示全量。
+
+- `split`
+  当前评测使用的是 `train` 还是 `test` split。
 
 - `generation_max_new_tokens`
   当前推理时允许生成的最大 token 数。

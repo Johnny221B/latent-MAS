@@ -33,3 +33,10 @@ def compute_grad_norm(parameters) -> float:
         grad_norm = param.grad.detach().norm(2).item()
         total += grad_norm * grad_norm
     return math.sqrt(total)
+
+
+def should_save_checkpoint(global_step: int, save_interval: int) -> bool:
+    """Return whether the current step should emit an intermediate checkpoint."""
+    if save_interval <= 0:
+        return False
+    return global_step > 0 and global_step % save_interval == 0

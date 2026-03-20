@@ -179,3 +179,111 @@ def test_build_chat_prompt_text_uses_system_and_user_messages():
             "enable_thinking": True,
         }
     ]
+
+
+def test_extract_gsm8k_answer_normalizes_trailing_decimal_punctuation():
+    from src.utils.answer_extraction import extract_answer
+
+    assert extract_answer("The answer is 10.", task_type="gsm8k") == "10"
+    assert extract_answer("#### 42.0", task_type="gsm8k") == "42"
+
+
+def test_chat_with_prefix_generation_inputs_disable_thinking_by_default():
+    class DummyTokenizer:
+        def __init__(self):
+            self.enable_thinking_values = []
+
+        def batch_decode(self, token_ids, skip_special_tokens=True):
+            return ["question"] * token_ids.shape[0]
+
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt, enable_thinking):
+            self.enable_thinking_values.append(enable_thinking)
+            return "prompt"
+
+        def __call__(self, prompts, return_tensors=None, padding=True, truncation=True, max_length=None, add_special_tokens=False):
+            batch_size = len(prompts)
+            return {
+                "input_ids": torch.ones(batch_size, 2, dtype=torch.long),
+                "attention_mask": torch.ones(batch_size, 2, dtype=torch.long),
+            }
+
+    class DummyBaseModel:
+        def __init__(self):
+            self.tokenizer = DummyTokenizer()
+
+        @property
+        def device(self):
+            return torch.device("cpu")
+
+    import torch
+
+    agent = Agent(
+        agent_id=0,
+        role_config={
+            "role_name": "summarizer",
+            "system_prompt": "You summarize.",
+            "reasoning_steps": 4,
+            "compress_last_k": 4,
+        },
+        base_model=DummyBaseModel(),
+    )
+
+    agent._build_generation_inputs(
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        task_attention_mask=torch.ones(1, 2, dtype=torch.long),
+        inference_mode="chat_with_prefix",
+    )
+
+    assert agent.base_model.tokenizer.enable_thinking_values == [False]
+
+
+def test_forward_for_loss_can_use_chat_with_prefix_prompt_shape():
+    class DummyTokenizer:
+        def batch_decode(self, token_ids, skip_special_tokens=True):
+            return ["question"] * token_ids.shape[0]
+
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt, enable_thinking):
+            return "chat-prompt"
+
+        def __call__(self, prompts, return_tensors=None, padding=True, truncation=True, max_length=None, add_special_tokens=False):
+            batch_size = len(prompts)
+            return {
+                "input_ids": torch.full((batch_size, 3), 9, dtype=torch.long),
+                "attention_mask": torch.ones(batch_size, 3, dtype=torch.long),
+            }
+
+    class DummyBaseModel:
+        def __init__(self):
+            self.tokenizer = DummyTokenizer()
+
+        @property
+        def device(self):
+            return torch.device("cpu")
+
+        def __call__(self, input_ids, attention_mask=None, prefix_embeds=None, output_hidden_states=True):
+            batch_size, seq_len = input_ids.shape
+            return {"logits": torch.zeros(batch_size, seq_len, 13)}
+
+    import torch
+
+    agent = Agent(
+        agent_id=0,
+        role_config={
+            "role_name": "summarizer",
+            "system_prompt": "You summarize.",
+            "reasoning_steps": 4,
+            "compress_last_k": 4,
+        },
+        base_model=DummyBaseModel(),
+    )
+
+    out = agent.forward_for_loss(
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        task_attention_mask=torch.ones(1, 2, dtype=torch.long),
+        answer_ids=torch.tensor([[5, 6]], dtype=torch.long),
+        answer_mask=torch.ones(1, 2, dtype=torch.long),
+        input_mode="chat_with_prefix",
+    )
+
+    assert out["question_len"] == 3
+    assert out["logits"].shape == (1, 5, 13)

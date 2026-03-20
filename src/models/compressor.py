@@ -82,6 +82,9 @@ class LatentCompressor(nn.Module):
                 Fixed-length latent prefix to be sent downstream.
         """
         B = hidden_states.shape[0]
+        compute_dtype = self.queries.dtype
+        if hidden_states.dtype != compute_dtype:
+            hidden_states = hidden_states.to(dtype=compute_dtype)
 
         # Expand queries for the batch
         queries = self.queries.expand(B, -1, -1)  # [B, Lp, D]

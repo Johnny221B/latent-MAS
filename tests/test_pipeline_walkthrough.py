@@ -7,7 +7,7 @@ Verifies:
 2. Alignment matrix W_a computes without errors
 3. Each non-terminal agent performs latent reasoning (no text output)
 4. Compressor produces valid prefixes from latent trajectories
-5. Aggregator combines multi-path prefixes with normalization
+5. Aggregator combines multi-path prefixes with direct weighted sums
 6. Terminal agent receives prefix, does forward pass, greedy-decodes to text
 7. The full pipeline produces a natural language answer
 

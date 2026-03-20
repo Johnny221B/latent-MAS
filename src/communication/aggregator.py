@@ -27,22 +27,18 @@ class MessageAggregator:
     ) -> torch.Tensor | None:
         j = agent_index
         incoming = []
-        weight_sum = 0.0
 
-        for i in range(j):
-            if all_prefixes[i] is None:
+        for i, prefix in enumerate(all_prefixes):
+            if i == j:
+                continue
+            if prefix is None:
                 continue
 
             weight = adjacency[i, j]
-            incoming.append(weight * all_prefixes[i])
-            weight_sum = weight_sum + weight  # differentiable
+            incoming.append(weight * prefix)
 
         if not incoming:
             return None
 
         z_j = torch.stack(incoming, dim=0).sum(dim=0)
-
-        # Normalize so incoming weights sum to 1
-        z_j = z_j / (weight_sum + 1e-8)
-
         return z_j

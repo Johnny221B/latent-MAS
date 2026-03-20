@@ -32,6 +32,9 @@ class DAGExecutor:
         use_terminal_prefix: bool = True,
         do_sample: bool = True,
         collect_agent_logs: bool = False,
+        execution_order: list[int] | None = None,
+        terminal_agent_index: int | None = None,
+        training_input_mode: str = "legacy_plain_with_prefix",
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -50,9 +53,14 @@ class DAGExecutor:
                 - all_prefixes: list of P_i for each agent (compressed)
         """
         n = len(agents)
-        B = task_token_ids.shape[0]
+        execution_order = execution_order or list(range(n))
+        terminal_index = terminal_agent_index if terminal_agent_index is not None else (n - 1)
+        if len(execution_order) != n or sorted(execution_order) != list(range(n)):
+            raise ValueError("execution_order must be a permutation of all agent indices")
+        if execution_order[-1] != terminal_index:
+            raise ValueError("terminal agent must be the last node in execution_order")
 
-        all_prefixes = []    # compressed P_i for each agent
+        all_prefixes = [None] * n
         agent_logs = []
 
         def summarize_tensor(name: str, value: torch.Tensor | None) -> dict | None:
@@ -67,7 +75,7 @@ class DAGExecutor:
                 "std": float(detached.std(unbiased=False).item()),
             }
 
-        for j in range(n):
+        for j in execution_order:
             # ── Step 1: Aggregate upstream prefixes ──
             upstream_prefix = self.aggregator.aggregate(
                 agent_index=j,
@@ -75,7 +83,7 @@ class DAGExecutor:
                 all_prefixes=all_prefixes,
             )
 
-            if j < n - 1:
+            if j != terminal_index:
                 # ── Non-terminal: latent reasoning → compress → pass downstream ──
                 agent_output = agents[j].reason(
                     task_token_ids=task_token_ids,
@@ -85,7 +93,7 @@ class DAGExecutor:
                 S_j = agent_output["hidden_trajectory"]
                 mask_j = agent_output["compressor_mask"]
                 P_j = compressor(S_j, mask=mask_j)
-                all_prefixes.append(P_j)
+                all_prefixes[j] = P_j
                 if collect_agent_logs:
                     agent_logs.append(
                         {
@@ -101,8 +109,6 @@ class DAGExecutor:
                     )
             else:
                 # ── Terminal agent ──
-                all_prefixes.append(None)
-
                 if training:
                     # Training: single forward pass, return logits for CE loss
                     terminal_output = agents[j].forward_for_loss(
@@ -111,6 +117,7 @@ class DAGExecutor:
                         upstream_prefix=upstream_prefix,
                         answer_ids=answer_ids,
                         answer_mask=answer_mask,
+                        input_mode=training_input_mode,
                     )
                 else:
                     # Inference: autoregressive generation, return text

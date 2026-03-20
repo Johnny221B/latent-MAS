@@ -27,12 +27,21 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 class BaseModelWrapper(nn.Module):
     """Wrapper around a frozen HuggingFace causal language model."""
 
-    def __init__(self, model_name: str, cache_dir: str | None = None):
+    def __init__(
+        self,
+        model_name: str,
+        cache_dir: str | None = None,
+        dtype: str | torch.dtype | None = None,
+    ):
         super().__init__()
 
         # ── Load model & tokenizer ──
         load_path, load_kwargs = self._resolve_model_path(model_name, cache_dir)
-        self.model = self._load_hf_model(load_path, load_kwargs)
+        self.model = self._load_hf_model(
+            load_path,
+            load_kwargs,
+            torch_dtype=self._resolve_dtype(dtype),
+        )
         self.tokenizer = self._load_hf_tokenizer(load_path, load_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -56,11 +65,30 @@ class BaseModelWrapper(nn.Module):
         return model_name, {}
 
     @staticmethod
-    def _load_hf_model(load_path: str, load_kwargs: dict):
+    def _resolve_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
+        if dtype is None:
+            return torch.float32
+        if isinstance(dtype, torch.dtype):
+            return dtype
+        normalized = str(dtype).strip().lower()
+        mapping = {
+            "float32": torch.float32,
+            "fp32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+        }
+        if normalized not in mapping:
+            raise ValueError(f"Unsupported model dtype: {dtype}")
+        return mapping[normalized]
+
+    @staticmethod
+    def _load_hf_model(load_path: str, load_kwargs: dict, torch_dtype: torch.dtype):
         try:
             return AutoModelForCausalLM.from_pretrained(
                 load_path,
-                torch_dtype=torch.float32,
+                torch_dtype=torch_dtype,
                 trust_remote_code=True,
                 **load_kwargs,
             )
@@ -69,7 +97,7 @@ class BaseModelWrapper(nn.Module):
             offline_kwargs["local_files_only"] = True
             return AutoModelForCausalLM.from_pretrained(
                 load_path,
-                torch_dtype=torch.float32,
+                torch_dtype=torch_dtype,
                 trust_remote_code=True,
                 **offline_kwargs,
             )
@@ -103,11 +131,24 @@ class BaseModelWrapper(nn.Module):
         """
         for param in self.model.parameters():
             param.requires_grad = False
+        self.base_model_trainable = False
         self.model.eval()
+
+    def set_trainable(self, trainable: bool) -> None:
+        self.base_model_trainable = trainable
+        for param in self.model.parameters():
+            param.requires_grad = trainable
+        if trainable:
+            self.model.train()
+        else:
+            self.model.eval()
 
     def train(self, mode: bool = True):
         super().train(mode)
-        self.model.eval()
+        if getattr(self, "base_model_trainable", False):
+            self.model.train(mode)
+        else:
+            self.model.eval()
         return self
 
     @property
@@ -126,6 +167,10 @@ class BaseModelWrapper(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return next(self.model.parameters()).dtype
+
+    def _helper_model(self):
+        """Return the underlying HF model for helper-style attribute access."""
+        return self.model.module if hasattr(self.model, "module") else self.model
     
     @staticmethod
     def _parse_model_output(outputs, output_hidden_states: bool = True) -> dict:
@@ -156,7 +201,7 @@ class BaseModelWrapper(nn.Module):
         Returns:
             embeddings: [batch_size, seq_len, hidden_dim]
         """
-        return self.model.get_input_embeddings()(input_ids)
+        return self._helper_model().get_input_embeddings()(input_ids)
 
     def forward(
         self,
@@ -356,8 +401,9 @@ class BaseModelWrapper(nn.Module):
         if hasattr(self, "_cached_alignment"):
             return self._cached_alignment
 
-        W_in = self.model.get_input_embeddings().weight.detach().float()  # [V, D]
-        W_out = self.model.lm_head.weight.detach().float()                # [V, D]
+        helper_model = self._helper_model()
+        W_in = helper_model.get_input_embeddings().weight.detach().float()  # [V, D]
+        W_out = helper_model.lm_head.weight.detach().float()                # [V, D]
 
         gram = W_out.T @ W_out                                            # [D, D]
         gram += lambda_reg * torch.eye(gram.shape[0], device=gram.device, dtype=gram.dtype)
@@ -501,7 +547,12 @@ class BaseModelWrapper(nn.Module):
             "prefix_len": prefix_len,
         }
 
-    def tokenize(self, texts: list[str], max_length: int = 512) -> dict:
+    def tokenize(
+        self,
+        texts: list[str],
+        max_length: int = 512,
+        add_special_tokens: bool = True,
+    ) -> dict:
         """Tokenize a batch of texts."""
         return self.tokenizer(
             texts,
@@ -509,4 +560,5 @@ class BaseModelWrapper(nn.Module):
             padding=True,
             truncation=True,
             max_length=max_length,
+            add_special_tokens=add_special_tokens,
         )

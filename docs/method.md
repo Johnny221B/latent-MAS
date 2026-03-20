@@ -68,15 +68,15 @@ $$
 当 agent $i$ 完成 $m$ 步推理并得到 $S_i$ 之后，它会使用一个 compressor，把内部 latent state 转换成一个固定长度的 latent prefix，再发送给下游 agent：
 
 $$
-P_{i \to j} = C_{i \to j}(S_i),
+P_i = C(S_i),
 $$
 
-其中 $C_{i \to j}$ 可以依赖具体的发送方和接收方，也可以更一般地依赖发送方角色和接收方角色。
+其中当前实现使用的是一个共享 compressor $C$。更一般的 $C_{i \to j}$ 或 role-pair-specific compressor 仍然可以作为后续扩展方向，但不是当前版本默认能力。
 
 对于下游 agent $j$，它会把所有来自上游节点的消息聚合成一个统一的 latent prefix：
 
 $$
-z_j = \sum_{i \in \mathcal{N}(j)} A_{ij} P_{i \to j},
+z_j = \sum_{i \in \mathcal{N}(j)} A_{ij} P_i,
 $$
 
 其中 $\mathcal{N}(j)$ 表示节点 $j$ 的所有上游邻居集合。
@@ -87,11 +87,12 @@ $$
 
 ### 学习目标
 
-系统的总体目标是联合学习以下几个部分：
+当前实现中，系统真正可训练的部分是：
 
 - 通信图 $A$
 - compressor $C$
-- 所有 agent 的角色感知 latent reasoning 与 message reading 机制
+
+基础 backbone agent 保持冻结；非终端 agent 的 latent reasoning 负责生成可被压缩的 latent trajectory，但其参数本身不在当前版本中更新。因此，当前训练目标应理解为“学习 communication layer”，而不是“联合更新所有 agent 的内部推理参数”。
 
 训练目标既要优化最终任务性能，也要鼓励学到的图结构保持稀疏、可解释，并尽量贴近经典角色先验图 $A^{(0)}$。
 
@@ -135,13 +136,13 @@ $$
 
 这里的每个 $h_i^{(t)}$ 不一定非要是单个向量。一个更有表达能力的设计是，让每个 step 对应一小段 latent token，因为如果每一步只用一个向量表示，容量可能会过于受限。
 
-然后，上游 agent 使用 compressor，把这一段 latent trajectory 压缩成一个固定长度的 latent prefix：
+然后，上游 agent 使用共享 compressor，把这一段 latent trajectory 压缩成一个固定长度的 latent prefix：
 
 $$
-P_{i \to j} = C_{i \to j}(S_i) \in \mathbb{R}^{L_p \times d},
+P_i = C(S_i) \in \mathbb{R}^{L_p \times d},
 $$
 
-其中，$C_{i \to j}$ 是一个可学习的 compressor，$P_{i \to j}$ 表示从上游 agent $i$ 发往下游 agent $j$ 的 latent message。
+其中，$C$ 是一个可学习的共享 compressor，$P_i$ 表示由上游 agent $i$ 产生、供其所有下游节点使用的 latent message。
 
 当下游 agent $j$ 收到来自多个上游节点的 prefix 信息后，它先把这些 prefix 聚合成一个接收端 prefix，记为 $P_j^{\mathrm{recv}}$，然后把这个 prefix 拼接到自己的输入前面：
 

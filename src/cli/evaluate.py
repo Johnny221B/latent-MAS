@@ -49,6 +49,12 @@ def build_agent_sample_log(
     }
 
 
+def _select_batch_item(value, index: int):
+    if isinstance(value, list):
+        return value[index]
+    return value
+
+
 def write_eval_snapshot(
     eval_path: Path,
     method: str,
@@ -56,6 +62,10 @@ def write_eval_snapshot(
     correct: int,
     total: int,
     time_seconds: float,
+    *,
+    avg_sample_seconds: float | None = None,
+    avg_generated_tokens: float | None = None,
+    avg_tokens_per_second: float | None = None,
     parameters: dict,
     world_size: int,
     samples: list[dict],
@@ -71,6 +81,9 @@ def write_eval_snapshot(
             "correct": correct,
             "total": total,
             "time_seconds": time_seconds,
+            "avg_sample_seconds": avg_sample_seconds,
+            "avg_generated_tokens": avg_generated_tokens,
+            "avg_tokens_per_second": avg_tokens_per_second,
         },
         "parameters": parameters,
         "world_size": world_size,
@@ -165,10 +178,15 @@ def gather_sharded_objects(local_obj, rank: int, world_size: int):
     return gathered
 
 
-def evaluate(
+def evaluate_loaded_system(
+    system,
+    config: dict,
+    *,
     config_path: str,
-    checkpoint_path: str,
+    output_dir: str | Path,
+    checkpoint_path: str | None = None,
     max_samples: int | None = None,
+    split: str = "test",
     max_new_tokens: int = 2048,
     inference_mode: str = "chat_with_prefix",
     use_terminal_prefix: bool = True,
@@ -176,6 +194,274 @@ def evaluate(
     do_sample: bool = False,
     write_agent_logs: bool = True,
     worker: int | None = None,
+    batch_size: int = 1,
+    device: torch.device | None = None,
+    rank: int = 0,
+    world_size: int = 1,
+    is_dist: bool = False,
+):
+    generation_max_new_tokens = max_new_tokens
+    output_dir = Path(output_dir)
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if hasattr(system, "to"):
+        system.to(device)
+    if hasattr(system, "eval"):
+        system.eval()
+
+    if is_main_process(rank):
+        print(f"\nLearned adjacency:")
+        if hasattr(system, "log_adjacency"):
+            print(system.log_adjacency())
+        if hasattr(system, "adjacency"):
+            A = system.adjacency.get_adjacency().detach()
+            print(f"Range: [{A.min().item():.4f}, {A.max().item():.4f}]")
+            print(f"Hard adjacency (threshold=0.5):")
+            print(system.adjacency.get_hard_adjacency())
+
+    task = config["training"]["task"]
+    if max_samples is not None and max_samples < 0:
+        max_samples = None
+    if is_main_process(rank):
+        print(f"\nLoading {task} {split} set...")
+    full_dataset = create_dataset(task=task, split=split, max_samples=max_samples)
+    dataset = shard_dataset(full_dataset, rank, world_size)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    if is_main_process(rank):
+        print(f"{split.capitalize()} samples: {len(full_dataset)}")
+        if world_size > 1:
+            print(
+                f"Sharded samples per rank: "
+                f"{[len(range(r, len(full_dataset), world_size)) for r in range(world_size)]}"
+            )
+        print(f"Eval batch size per rank: {batch_size}")
+
+    correct = 0
+    total = 0
+    results = []
+    agent_log_results = []
+    sample_durations = []
+    generated_token_counts = []
+    eval_stem = "eval_results" if split == "test" else f"eval_results_{split}"
+    agent_log_stem = "agent_logs" if split == "test" else f"agent_logs_{split}"
+    eval_path = output_dir / f"{eval_stem}.json"
+    agent_log_path = output_dir / f"{agent_log_stem}.json"
+    if is_main_process(rank):
+        for path in (eval_path, agent_log_path):
+            if path.exists():
+                path.unlink()
+
+    if is_main_process(rank):
+        print("\nRunning evaluation...")
+    t_start = time.time()
+
+    local_steps = len(dataloader)
+    step_counts = gather_sharded_objects(local_steps, rank, world_size)
+    max_steps = max(step_counts)
+    dataloader_iter = iter(dataloader)
+
+    with torch.no_grad():
+        for idx in range(max_steps):
+            batch = None
+            local_update = None
+            t0 = time.time()
+
+            if idx < local_steps:
+                batch = next(dataloader_iter)
+
+                tokenized = system.base_model.tokenize(
+                    batch["questions"],
+                    max_length=config["training"].get("max_seq_len", 2048),
+                )
+                task_ids = tokenized["input_ids"].to(device)
+                task_mask = tokenized["attention_mask"].to(device)
+
+                output = system(
+                    task_token_ids=task_ids,
+                    task_attention_mask=task_mask,
+                    max_new_tokens=generation_max_new_tokens,
+                    inference_mode=inference_mode,
+                    use_terminal_prefix=use_terminal_prefix,
+                    do_sample=do_sample,
+                    collect_agent_logs=write_agent_logs,
+                )
+
+                generated_text = output["generated_text"]
+                generation = output.get("generation", {})
+                agent_logs = output.get("agent_logs", [])
+                batch_questions = batch["questions"]
+                batch_answers = batch["answers"]
+                batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
+                batch_size_actual = len(batch_questions)
+                batch_elapsed = time.time() - t0
+                per_sample_seconds = batch_elapsed / max(batch_size_actual, 1)
+                local_update = []
+                for sample_idx in range(batch_size_actual):
+                    sample_generation = {
+                        key: _select_batch_item(value, sample_idx)
+                        for key, value in generation.items()
+                    }
+                    pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
+                    gold = batch_answers[sample_idx].strip()
+                    is_correct = pred.strip() == gold.strip()
+                    local_update.append(
+                        {
+                            "question": batch_questions[sample_idx],
+                            "gold": gold,
+                            "prediction": pred,
+                            "generation": sample_generation,
+                            "correct": is_correct,
+                            "agent_log": build_agent_sample_log(
+                                question=batch_questions[sample_idx],
+                                gold=gold,
+                                prediction=pred,
+                                generation=sample_generation,
+                                correct=is_correct,
+                                agent_logs=agent_logs,
+                            ) if write_agent_logs else None,
+                            "sample_seconds": per_sample_seconds,
+                        }
+                    )
+
+            gathered_updates = gather_sharded_objects(local_update, rank, world_size)
+
+            if not is_main_process(rank):
+                continue
+
+            for shard_updates in gathered_updates:
+                if shard_updates is None:
+                    continue
+                for shard_update in shard_updates:
+                    if shard_update["correct"]:
+                        correct += 1
+                    total += 1
+                    sample_durations.append(shard_update["sample_seconds"])
+                    generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
+                    sample_result = {
+                        "question": shard_update["question"],
+                        "gold": shard_update["gold"],
+                        "prediction": shard_update["prediction"],
+                        "generation": shard_update["generation"],
+                        "correct": shard_update["correct"],
+                    }
+                    if write_agent_logs and shard_update["agent_log"] is not None:
+                        sample_result["agent_log"] = shard_update["agent_log"]
+                        agent_log_results.append(shard_update["agent_log"])
+                    results.append(sample_result)
+
+            params = {
+                "config_path": config_path,
+                "checkpoint_path": checkpoint_path,
+                "split": split,
+                "max_samples": max_samples,
+                "generation_max_new_tokens": generation_max_new_tokens,
+                "inference_mode": inference_mode,
+                "use_terminal_prefix": use_terminal_prefix,
+                "do_sample": do_sample,
+                "write_agent_logs": write_agent_logs,
+                "worker": worker,
+                "batch_size": batch_size,
+                "config": copy.deepcopy(config),
+            }
+            write_eval_snapshot(
+                eval_path=eval_path,
+                method="ours_trained_multi_agent",
+                task=task,
+                correct=correct,
+                total=total,
+                time_seconds=time.time() - t_start,
+                avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+                avg_generated_tokens=(
+                    sum(generated_token_counts) / len(generated_token_counts)
+                ) if generated_token_counts else None,
+                avg_tokens_per_second=(
+                    (sum(generated_token_counts) / sum(sample_durations))
+                    if sample_durations and sum(sample_durations) > 0
+                    else None
+                ),
+                parameters=params,
+                world_size=world_size,
+                samples=results,
+            )
+            if write_agent_logs:
+                write_agent_log_snapshot(
+                    agent_log_path=agent_log_path,
+                    method="ours_trained_multi_agent",
+                    task=task,
+                    parameters=params,
+                    samples=agent_log_results,
+                )
+
+            if total > 0 and ((total % 10) == 0 or total == len(full_dataset)):
+                acc = correct / total * 100
+                print(f"  [{total}/{len(full_dataset)}] Acc: {acc:.1f}% ({correct}/{total})")
+
+    if not is_main_process(rank):
+        return None
+
+    t_total = time.time() - t_start
+    accuracy = correct / total * 100 if total > 0 else 0.0
+
+    print(f"\n{'='*60}")
+    print(f"  EVALUATION RESULTS")
+    print(f"{'='*60}")
+    print(f"  Task:     {task}")
+    print(f"  Split:    {split}")
+    print(f"  Samples:  {total}")
+    print(f"  Correct:  {correct}")
+    print(f"  Accuracy: {accuracy:.2f}%")
+    print(f"  Time:     {t_total:.1f}s ({t_total/max(total, 1):.1f}s/sample)")
+    if sample_durations:
+        print(f"  Avg sample: {sum(sample_durations)/len(sample_durations):.2f}s")
+    if generated_token_counts:
+        print(f"  Avg generated tokens: {sum(generated_token_counts)/len(generated_token_counts):.2f}")
+        if sample_durations and sum(sample_durations) > 0:
+            print(f"  Tokens/sec: {sum(generated_token_counts)/sum(sample_durations):.2f}")
+    print(f"{'='*60}")
+
+    if run_baseline:
+        print("Baseline comparison is not supported in evaluate_loaded_system().")
+
+    result_payload = {
+        "method": "ours_trained_multi_agent",
+        "task": task,
+        "metrics": {
+            "accuracy": accuracy,
+            "correct": correct,
+            "total": total,
+            "time_seconds": t_total,
+            "avg_sample_seconds": (sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+            "avg_generated_tokens": (
+                sum(generated_token_counts) / len(generated_token_counts)
+            ) if generated_token_counts else None,
+            "avg_tokens_per_second": (
+                (sum(generated_token_counts) / sum(sample_durations))
+                if sample_durations and sum(sample_durations) > 0
+                else None
+            ),
+        },
+        "paths": {
+            "eval_path": str(eval_path),
+            "agent_log_path": str(agent_log_path) if write_agent_logs else None,
+        },
+    }
+    return result_payload
+
+
+def evaluate(
+    config_path: str,
+    checkpoint_path: str,
+    max_samples: int | None = None,
+    split: str = "test",
+    max_new_tokens: int = 2048,
+    inference_mode: str = "chat_with_prefix",
+    use_terminal_prefix: bool = True,
+    run_baseline: bool = False,
+    do_sample: bool = False,
+    write_agent_logs: bool = True,
+    worker: int | None = None,
+    batch_size: int = 1,
 ):
     config = load_config(config_path)
     generation_max_new_tokens = max_new_tokens
@@ -193,6 +479,10 @@ def evaluate(
     if is_main_process(rank):
         print(f"Loading checkpoint: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location="cpu")
+
+    base_model_state = ckpt.get("base_model_state")
+    if base_model_state is not None:
+        system.base_model.model.load_state_dict(base_model_state)
 
     # Handle DDP-wrapped state dict (keys may have "module." prefix)
     comp_state = ckpt["compressor_state"]
@@ -221,22 +511,27 @@ def evaluate(
         max_samples = None
     if is_main_process(rank):
         print(f"\nLoading {task} test set...")
-    full_dataset = create_dataset(task=task, split="test", max_samples=max_samples)
+    full_dataset = create_dataset(task=task, split=split, max_samples=max_samples)
     dataset = shard_dataset(full_dataset, rank, world_size)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
     if is_main_process(rank):
-        print(f"Test samples: {len(full_dataset)}")
+        print(f"{split.capitalize()} samples: {len(full_dataset)}")
         if world_size > 1:
             print(f"Sharded samples per rank: {[len(range(r, len(full_dataset), world_size)) for r in range(world_size)]}")
+        print(f"Eval batch size per rank: {batch_size}")
 
     # ── Evaluate ──
     correct = 0
     total = 0
     results = []
     agent_log_results = []
+    sample_durations = []
+    generated_token_counts = []
     checkpoint_dir = Path(checkpoint_path).parent
-    eval_path = checkpoint_dir / "eval_results.json"
-    agent_log_path = checkpoint_dir / "agent_logs.json"
+    eval_stem = "eval_results" if split == "test" else f"eval_results_{split}"
+    agent_log_stem = "agent_logs" if split == "test" else f"agent_logs_{split}"
+    eval_path = checkpoint_dir / f"{eval_stem}.json"
+    agent_log_path = checkpoint_dir / f"{agent_log_stem}.json"
     if is_main_process(rank):
         cleanup_patterns = [
             "eval_results.partial.rank*.json",
@@ -289,50 +584,65 @@ def evaluate(
                 generated_text = output["generated_text"]
                 generation = output.get("generation", {})
                 agent_logs = output.get("agent_logs", [])
-
-                pred = extract_answer(generated_text, task_type=task)
-                gold = batch["answers"][0].strip()
-                is_correct = pred.strip() == gold.strip()
-
-                local_update = {
-                    "question": batch["questions"][0],
-                    "gold": gold,
-                    "prediction": pred,
-                    "generation": generation,
-                    "correct": is_correct,
-                    "agent_log": build_agent_sample_log(
-                        question=batch["questions"][0],
-                        gold=gold,
-                        prediction=pred,
-                        generation=generation,
-                        correct=is_correct,
-                        agent_logs=agent_logs,
-                    ) if write_agent_logs else None,
-                    "sample_seconds": time.time() - t0,
-                }
+                batch_questions = batch["questions"]
+                batch_answers = batch["answers"]
+                batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
+                batch_size_actual = len(batch_questions)
+                batch_elapsed = time.time() - t0
+                per_sample_seconds = batch_elapsed / max(batch_size_actual, 1)
+                local_update = []
+                for sample_idx in range(batch_size_actual):
+                    sample_generation = {
+                        key: _select_batch_item(value, sample_idx)
+                        for key, value in generation.items()
+                    }
+                    pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
+                    gold = batch_answers[sample_idx].strip()
+                    is_correct = pred.strip() == gold.strip()
+                    local_update.append(
+                        {
+                            "question": batch_questions[sample_idx],
+                            "gold": gold,
+                            "prediction": pred,
+                            "generation": sample_generation,
+                            "correct": is_correct,
+                            "agent_log": build_agent_sample_log(
+                                question=batch_questions[sample_idx],
+                                gold=gold,
+                                prediction=pred,
+                                generation=sample_generation,
+                                correct=is_correct,
+                                agent_logs=agent_logs,
+                            ) if write_agent_logs else None,
+                            "sample_seconds": per_sample_seconds,
+                        }
+                    )
 
             gathered_updates = gather_sharded_objects(local_update, rank, world_size)
 
             if not is_main_process(rank):
                 continue
 
-            for shard_update in gathered_updates:
-                if shard_update is None:
+            for shard_updates in gathered_updates:
+                if shard_updates is None:
                     continue
-                if shard_update["correct"]:
-                    correct += 1
-                total += 1
-                sample_result = {
-                    "question": shard_update["question"],
-                    "gold": shard_update["gold"],
-                    "prediction": shard_update["prediction"],
-                    "generation": shard_update["generation"],
-                    "correct": shard_update["correct"],
-                }
-                if write_agent_logs and shard_update["agent_log"] is not None:
-                    sample_result["agent_log"] = shard_update["agent_log"]
-                    agent_log_results.append(shard_update["agent_log"])
-                results.append(sample_result)
+                for shard_update in shard_updates:
+                    if shard_update["correct"]:
+                        correct += 1
+                    total += 1
+                    sample_durations.append(shard_update["sample_seconds"])
+                    generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
+                    sample_result = {
+                        "question": shard_update["question"],
+                        "gold": shard_update["gold"],
+                        "prediction": shard_update["prediction"],
+                        "generation": shard_update["generation"],
+                        "correct": shard_update["correct"],
+                    }
+                    if write_agent_logs and shard_update["agent_log"] is not None:
+                        sample_result["agent_log"] = shard_update["agent_log"]
+                        agent_log_results.append(shard_update["agent_log"])
+                    results.append(sample_result)
 
             write_eval_snapshot(
                 eval_path=eval_path,
@@ -341,9 +651,17 @@ def evaluate(
                 correct=correct,
                 total=total,
                 time_seconds=time.time() - t_start,
+                avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+                avg_generated_tokens=(sum(generated_token_counts) / len(generated_token_counts)) if generated_token_counts else None,
+                avg_tokens_per_second=(
+                    (sum(generated_token_counts) / sum(sample_durations))
+                    if sample_durations and sum(sample_durations) > 0
+                    else None
+                ),
                 parameters={
                     "config_path": config_path,
                     "checkpoint_path": checkpoint_path,
+                    "split": split,
                     "max_samples": max_samples,
                     "generation_max_new_tokens": generation_max_new_tokens,
                     "inference_mode": inference_mode,
@@ -351,6 +669,7 @@ def evaluate(
                     "do_sample": do_sample,
                     "write_agent_logs": write_agent_logs,
                     "worker": worker,
+                    "batch_size": batch_size,
                     "config": copy.deepcopy(config),
                 },
                 world_size=world_size,
@@ -364,6 +683,7 @@ def evaluate(
                     parameters={
                         "config_path": config_path,
                         "checkpoint_path": checkpoint_path,
+                        "split": split,
                         "max_samples": max_samples,
                         "generation_max_new_tokens": generation_max_new_tokens,
                         "inference_mode": inference_mode,
@@ -371,6 +691,7 @@ def evaluate(
                         "do_sample": do_sample,
                         "write_agent_logs": write_agent_logs,
                         "worker": worker,
+                        "batch_size": batch_size,
                     },
                     samples=agent_log_results,
                 )
@@ -403,10 +724,18 @@ def evaluate(
     print(f"  EVALUATION RESULTS")
     print(f"{'='*60}")
     print(f"  Task:     {task}")
+    print(f"  Split:    {split}")
     print(f"  Samples:  {total}")
     print(f"  Correct:  {correct}")
     print(f"  Accuracy: {accuracy:.2f}%")
     print(f"  Time:     {t_total:.1f}s ({t_total/total:.1f}s/sample)")
+    if sample_durations:
+        print(f"  Avg sample: {sum(sample_durations)/len(sample_durations):.2f}s")
+    if generated_token_counts:
+        avg_tokens = sum(generated_token_counts) / len(generated_token_counts)
+        print(f"  Avg gen tokens: {avg_tokens:.1f}")
+        if sum(sample_durations) > 0:
+            print(f"  Tokens/s: {sum(generated_token_counts)/sum(sample_durations):.2f}")
     print(f"{'='*60}")
 
     write_eval_snapshot(
@@ -416,9 +745,17 @@ def evaluate(
         correct=correct,
         total=total,
         time_seconds=t_total,
+        avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+        avg_generated_tokens=(sum(generated_token_counts) / len(generated_token_counts)) if generated_token_counts else None,
+        avg_tokens_per_second=(
+            (sum(generated_token_counts) / sum(sample_durations))
+            if sample_durations and sum(sample_durations) > 0
+            else None
+        ),
         parameters={
             "config_path": config_path,
             "checkpoint_path": checkpoint_path,
+            "split": split,
             "max_samples": max_samples,
             "generation_max_new_tokens": generation_max_new_tokens,
             "inference_mode": inference_mode,
@@ -426,6 +763,7 @@ def evaluate(
             "do_sample": do_sample,
             "write_agent_logs": write_agent_logs,
             "worker": worker,
+            "batch_size": batch_size,
             "config": copy.deepcopy(config),
         },
         world_size=world_size,
@@ -510,9 +848,17 @@ def evaluate(
             correct=correct,
             total=total,
             time_seconds=t_total,
+            avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+            avg_generated_tokens=(sum(generated_token_counts) / len(generated_token_counts)) if generated_token_counts else None,
+            avg_tokens_per_second=(
+                (sum(generated_token_counts) / sum(sample_durations))
+                if sample_durations and sum(sample_durations) > 0
+                else None
+            ),
             parameters={
                 "config_path": config_path,
                 "checkpoint_path": checkpoint_path,
+                "split": split,
                 "max_samples": max_samples,
                 "generation_max_new_tokens": generation_max_new_tokens,
                 "inference_mode": inference_mode,
@@ -565,9 +911,17 @@ def evaluate(
         correct=correct,
         total=total,
         time_seconds=t_total,
+        avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+        avg_generated_tokens=(sum(generated_token_counts) / len(generated_token_counts)) if generated_token_counts else None,
+        avg_tokens_per_second=(
+            (sum(generated_token_counts) / sum(sample_durations))
+            if sample_durations and sum(sample_durations) > 0
+            else None
+        ),
         parameters={
             "config_path": config_path,
             "checkpoint_path": checkpoint_path,
+            "split": split,
             "max_samples": max_samples,
             "generation_max_new_tokens": generation_max_new_tokens,
             "inference_mode": inference_mode,
@@ -609,6 +963,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--split", type=str, default="test", choices=["train", "test"])
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument(
         "--inference-mode",
@@ -629,11 +984,13 @@ if __name__ == "__main__":
     parser.add_argument("--do-sample", action="store_true")
     parser.add_argument("--no-agent-logs", action="store_true")
     parser.add_argument("--worker", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=1)
     args = parser.parse_args()
     evaluate(
         args.config,
         args.checkpoint,
         args.max_samples,
+        args.split,
         args.max_new_tokens,
         inference_mode=args.inference_mode,
         use_terminal_prefix=not args.no_terminal_prefix,
@@ -641,4 +998,5 @@ if __name__ == "__main__":
         do_sample=args.do_sample,
         write_agent_logs=not args.no_agent_logs,
         worker=args.worker,
+        batch_size=args.batch_size,
     )

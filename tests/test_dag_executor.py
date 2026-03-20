@@ -38,8 +38,7 @@ def test_aggregator_weighted_sum():
         all_prefixes=[P0, P1],
     )
 
-    # Aggregator normalizes by the total incoming weight.
-    expected = (0.5 * P0 + 0.3 * P1) / (0.5 + 0.3)
+    expected = 0.5 * P0 + 0.3 * P1
     assert torch.allclose(result, expected, atol=1e-6), f"Expected {expected[0,0,0]}, got {result[0,0,0]}"
     print("✓ test_aggregator_weighted_sum passed")
 
@@ -230,6 +229,66 @@ def test_dag_executor_collects_agent_logs():
     assert out["agent_logs"][0]["hidden_trajectory"]["shape"] == [1, 2, 4]
     assert out["agent_logs"][1]["output_type"] == "text"
     assert out["agent_logs"][1]["generated_text"] == "42"
+
+
+def test_dag_executor_respects_explicit_execution_order_for_non_terminal_agents():
+    call_order = []
+
+    class FakeAgent:
+        def __init__(self, agent_id, role_name):
+            self.agent_id = agent_id
+            self.role_name = role_name
+            self.system_prompt = role_name
+            self.received_prefix = None
+
+        def reason(self, **kwargs):
+            call_order.append(self.role_name)
+            self.received_prefix = kwargs["upstream_prefix"]
+            return {
+                "hidden_trajectory": torch.full((1, 1, 4), float(self.agent_id + 1)),
+                "compressor_mask": torch.ones(1, 1),
+            }
+
+        def generate_answer(self, **kwargs):
+            call_order.append(self.role_name)
+            self.received_prefix = kwargs["upstream_prefix"]
+            return {
+                "generated_text": "done",
+                "finish_reason": "eos",
+                "generated_token_count": 1,
+                "stopped_early": True,
+            }
+
+    class FakeCompressor:
+        def __call__(self, hidden, mask=None):
+            return hidden
+
+    agents = [
+        FakeAgent(0, "reader"),
+        FakeAgent(1, "summarizer"),
+        FakeAgent(2, "solver"),
+    ]
+    adjacency = torch.tensor([
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ])
+
+    executor = DAGExecutor(aggregator=MessageAggregator())
+    out = executor.execute(
+        agents=agents,
+        adjacency=adjacency,
+        compressor=FakeCompressor(),
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        training=False,
+        execution_order=[0, 2, 1],
+        terminal_agent_index=1,
+    )
+
+    assert out["generated_text"] == "done"
+    assert call_order == ["reader", "solver", "summarizer"]
+    assert agents[1].received_prefix is not None
+    assert torch.allclose(agents[1].received_prefix, torch.full((1, 1, 4), 3.0))
 
 
 if __name__ == "__main__":

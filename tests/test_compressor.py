@@ -52,6 +52,17 @@ def test_compressor_with_mask():
     print("✓ test_compressor_with_mask passed")
 
 
+def test_compressor_accepts_bfloat16_hidden_states_with_float32_parameters():
+    D = 64
+    comp = LatentCompressor(hidden_dim=D, num_queries=8, num_heads=4)
+
+    x = torch.randn(2, 20, D, dtype=torch.bfloat16)
+    out = comp(x)
+
+    assert out.shape == (2, 8, D)
+    assert out.dtype == comp.queries.dtype
+
+
 if __name__ == "__main__":
     test_compressor_output_shape()
     test_compressor_gradient_flow()

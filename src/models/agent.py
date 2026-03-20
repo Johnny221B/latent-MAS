@@ -41,10 +41,9 @@ class Agent:
         self.role_config = role_config
         self.role_name = role_config["role_name"]
         self.system_prompt = role_config["system_prompt"]
-        self.reasoning_steps = role_config.get("reasoning_steps", 4)
+        self.reasoning_steps = role_config.get("reasoning_steps", 256)
         self.base_model = base_model
         self.max_seq_len = max_seq_len
-        self.reasoning_steps = role_config.get("reasoning_steps", 256)
         self.compress_last_k = role_config.get("compress_last_k", 40)
 
         # Pre-tokenize the role prompt (system prompt)
@@ -131,7 +130,7 @@ class Agent:
                 tokenizer=self.base_model.tokenizer,
                 question_text=question_text,
                 system_prompt=self.system_prompt,
-                enable_thinking=True,
+                enable_thinking=False,
             )
             for question_text in question_texts
         ]
@@ -150,6 +149,40 @@ class Agent:
         return input_ids, attention_mask
 
     @staticmethod
+    def _left_pad_for_generation(
+        input_ids: torch.LongTensor,
+        attention_mask: torch.Tensor | None,
+        pad_token_id: int,
+    ) -> tuple[torch.LongTensor, torch.Tensor | None]:
+        if attention_mask is None:
+            return input_ids, attention_mask
+
+        valid_lengths = attention_mask.sum(dim=1)
+        max_valid_len = int(valid_lengths.max().item())
+        if torch.all(attention_mask == 1):
+            return input_ids, attention_mask
+
+        padded_input_ids = torch.full(
+            (input_ids.shape[0], max_valid_len),
+            pad_token_id,
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        padded_attention_mask = torch.zeros(
+            (attention_mask.shape[0], max_valid_len),
+            dtype=attention_mask.dtype,
+            device=attention_mask.device,
+        )
+
+        for row_idx, valid_len in enumerate(valid_lengths.tolist()):
+            valid_len = int(valid_len)
+            valid_tokens = input_ids[row_idx][attention_mask[row_idx].bool()]
+            padded_input_ids[row_idx, max_valid_len - valid_len:] = valid_tokens
+            padded_attention_mask[row_idx, max_valid_len - valid_len:] = 1
+
+        return padded_input_ids, padded_attention_mask
+
+    @staticmethod
     def _infer_finish_reason(
         generated_ids: list[int],
         eos_token_id: int | None,
@@ -160,6 +193,53 @@ class Agent:
         if len(generated_ids) >= max_new_tokens:
             return "max_new_tokens"
         return "stopped_early"
+
+    @staticmethod
+    def _finalize_generation_outputs(
+        tokenizer,
+        generated_token_ids: list[list[int]],
+        eos_token_id: int | None,
+        max_new_tokens: int,
+        inference_mode: str,
+        use_upstream_prefix: bool,
+        return_metadata: bool,
+    ) -> str | list[str] | dict:
+        generated_texts = [
+            tokenizer.decode(token_ids, skip_special_tokens=True)
+            for token_ids in generated_token_ids
+        ]
+        finish_reasons = [
+            Agent._infer_finish_reason(
+                generated_ids=token_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=max_new_tokens,
+            )
+            for token_ids in generated_token_ids
+        ]
+        token_counts = [len(token_ids) for token_ids in generated_token_ids]
+        stopped_early = [reason != "max_new_tokens" for reason in finish_reasons]
+
+        if len(generated_texts) == 1:
+            generated_text = generated_texts[0]
+            finish_reason = finish_reasons[0]
+            generated_token_count = token_counts[0]
+            stopped = stopped_early[0]
+        else:
+            generated_text = generated_texts
+            finish_reason = finish_reasons
+            generated_token_count = token_counts
+            stopped = stopped_early
+
+        if return_metadata:
+            return {
+                "generated_text": generated_text,
+                "finish_reason": finish_reason,
+                "generated_token_count": generated_token_count,
+                "stopped_early": stopped,
+                "inference_mode": inference_mode,
+                "used_upstream_prefix": use_upstream_prefix,
+            }
+        return generated_text
 
     def reason(
             self,
@@ -227,6 +307,7 @@ class Agent:
         upstream_prefix: torch.Tensor | None = None,
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
+        input_mode: str = "legacy_plain_with_prefix",
     ) -> dict:
         """Forward pass for terminal agent with teacher forcing.
 
@@ -241,26 +322,44 @@ class Agent:
             answer_ids: [B, answer_len] ground truth answer tokens
             answer_mask: [B, answer_len] attention mask for answer
         """
-        # Build: [role_prompt ; question ; answer]
-        role_ids = self._get_role_token_ids().expand(task_token_ids.shape[0], -1)
-        
-        if answer_ids is not None:
-            input_ids = torch.cat([role_ids, task_token_ids, answer_ids], dim=1)
-        else:
-            input_ids = torch.cat([role_ids, task_token_ids], dim=1)
-
-        # Build attention mask
-        B = task_token_ids.shape[0]
-        role_len = role_ids.shape[1]
-        role_mask_part = torch.ones(B, role_len, device=task_token_ids.device, dtype=torch.long)
-
-        if task_attention_mask is not None:
-            if answer_ids is not None and answer_mask is not None:
-                attention_mask = torch.cat([role_mask_part, task_attention_mask, answer_mask], dim=1)
+        if input_mode == "legacy_plain_with_prefix":
+            role_ids = self._get_role_token_ids().expand(task_token_ids.shape[0], -1)
+            if answer_ids is not None:
+                input_ids = torch.cat([role_ids, task_token_ids, answer_ids], dim=1)
             else:
-                attention_mask = torch.cat([role_mask_part, task_attention_mask], dim=1)
+                input_ids = torch.cat([role_ids, task_token_ids], dim=1)
+
+            B = task_token_ids.shape[0]
+            role_len = role_ids.shape[1]
+            role_mask_part = torch.ones(B, role_len, device=task_token_ids.device, dtype=torch.long)
+
+            if task_attention_mask is not None:
+                if answer_ids is not None and answer_mask is not None:
+                    attention_mask = torch.cat([role_mask_part, task_attention_mask, answer_mask], dim=1)
+                else:
+                    attention_mask = torch.cat([role_mask_part, task_attention_mask], dim=1)
+            else:
+                attention_mask = None
+            prompt_len = role_len + task_token_ids.shape[1]
+            logits_start = role_len
         else:
-            attention_mask = None
+            if input_mode != "chat_with_prefix":
+                raise ValueError(f"Unsupported input_mode: {input_mode}")
+            prompt_ids, prompt_mask = self._build_generation_inputs(
+                task_token_ids=task_token_ids,
+                task_attention_mask=task_attention_mask,
+                inference_mode="chat_with_prefix",
+            )
+            if answer_ids is not None:
+                input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
+            else:
+                input_ids = prompt_ids
+            if prompt_mask is not None and answer_ids is not None and answer_mask is not None:
+                attention_mask = torch.cat([prompt_mask, answer_mask], dim=1)
+            else:
+                attention_mask = prompt_mask
+            prompt_len = prompt_ids.shape[1]
+            logits_start = 0
 
         # Forward through frozen model
         outputs = self.base_model(
@@ -270,12 +369,13 @@ class Agent:
             output_hidden_states=True,
         )
 
-        # Slice off role_prompt positions, keep [question ; answer]
-        logits = outputs["logits"][:, role_len:, :]
+        # Keep [prompt ; answer] for chat mode and [question ; answer] for legacy mode,
+        # so the masked labels still supervise the first answer token correctly.
+        logits = outputs["logits"][:, logits_start:, :]
 
         return {
-            "logits": logits,                # [B, question_len + answer_len, V]
-            "question_len": task_token_ids.shape[1],
+            "logits": logits,
+            "question_len": prompt_len,
             "answer_len": answer_ids.shape[1] if answer_ids is not None else 0,
         }
         
@@ -298,15 +398,27 @@ class Agent:
             task_attention_mask=task_attention_mask,
             inference_mode=inference_mode,
         )
+        pad_token_id = self.base_model.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.base_model.tokenizer.eos_token_id or 0
+        input_ids, attention_mask = self._left_pad_for_generation(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pad_token_id=pad_token_id,
+        )
         if not use_upstream_prefix:
             upstream_prefix = None
         eos_token_id = self.base_model.tokenizer.eos_token_id
+        generation_model = (
+            self.base_model._helper_model()
+            if hasattr(self.base_model, "_helper_model")
+            else self.base_model.model
+        )
 
         # If we have upstream prefix, we need to:
         # 1. Convert input_ids to embeddings
         # 2. Prepend the prefix
-        # 3. Do a forward pass to get KV cache
-        # 4. Then generate from there
+        # 3. Delegate generation to HF so cache/position handling stays model-correct
         if upstream_prefix is not None:
             token_embeds = self.base_model.get_input_embeddings(input_ids)
             prefix = upstream_prefix.to(dtype=token_embeds.dtype, device=token_embeds.device)
@@ -321,70 +433,32 @@ class Agent:
                 )
                 attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
 
-            # Forward pass to build KV cache from prefix + input
-            outputs = self.base_model.model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                use_cache=True,
-                return_dict=True,
+            generate_kwargs = {
+                "inputs_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": do_sample,
+                "pad_token_id": pad_token_id,
+                "return_dict_in_generate": True,
+            }
+            if eos_token_id is not None:
+                generate_kwargs["eos_token_id"] = eos_token_id
+            if do_sample:
+                generate_kwargs["temperature"] = temperature
+                generate_kwargs["top_p"] = top_p
+            gen_out = generation_model.generate(**generate_kwargs)
+            sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
+            generated_ids = [sequences[row_idx].tolist() for row_idx in range(sequences.shape[0])]
+
+            return self._finalize_generation_outputs(
+                tokenizer=self.base_model.tokenizer,
+                generated_token_ids=generated_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=max_new_tokens,
+                inference_mode=inference_mode,
+                use_upstream_prefix=use_upstream_prefix,
+                return_metadata=return_metadata,
             )
-            past_kv = outputs.past_key_values if hasattr(outputs, 'past_key_values') else outputs[1]
-
-            # Now generate token by token using KV cache
-            generated_ids = []
-            raw = self.base_model._parse_model_output(outputs, output_hidden_states=False)
-            next_logits = raw["logits"][:, -1, :]  # [1, V]
-            finish_reason = "max_new_tokens"
-
-            for step in range(max_new_tokens):
-                if do_sample and temperature > 0:
-                    probs = torch.softmax(next_logits / temperature, dim=-1)
-                    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-                    cumsum = torch.cumsum(sorted_probs, dim=-1)
-                    mask = cumsum - sorted_probs > top_p
-                    sorted_probs[mask] = 0.0
-                    sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
-                    next_token = sorted_indices.gather(1, torch.multinomial(sorted_probs, 1))
-                else:
-                    next_token = next_logits.argmax(dim=-1, keepdim=True)
-
-                generated_ids.append(next_token.item())
-
-                if next_token.item() == eos_token_id:
-                    finish_reason = "eos"
-                    break
-
-                # Forward next token with KV cache
-                next_embed = self.base_model.get_input_embeddings(next_token)
-
-                if hasattr(past_kv, "get_seq_length"):
-                    past_len = past_kv.get_seq_length()
-                else:
-                    past_len = past_kv[0][0].shape[-2]
-
-                step_mask = torch.ones(1, past_len + 1, dtype=torch.long, device=input_ids.device)
-                out = self.base_model.model(
-                    inputs_embeds=next_embed,
-                    attention_mask=step_mask,
-                    past_key_values=past_kv,
-                    use_cache=True,
-                    return_dict=True,
-                )
-                raw = self.base_model._parse_model_output(out, output_hidden_states=False)
-                past_kv = raw["past_key_values"]
-                next_logits = raw["logits"][:, -1, :]
-
-            generated_text = self.base_model.tokenizer.decode(generated_ids, skip_special_tokens=True)
-            if return_metadata:
-                return {
-                    "generated_text": generated_text,
-                    "finish_reason": finish_reason,
-                    "generated_token_count": len(generated_ids),
-                    "stopped_early": finish_reason != "max_new_tokens",
-                    "inference_mode": inference_mode,
-                    "used_upstream_prefix": use_upstream_prefix,
-                }
-            return generated_text
 
         else:
             # No prefix — just use model.generate directly
@@ -399,29 +473,23 @@ class Agent:
             if do_sample:
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
-            gen_out = self.base_model.model.generate(
+            gen_out = generation_model.generate(
                 **generate_kwargs,
             )
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
-            generated_token_ids = sequences[0][input_ids.shape[1]:].tolist()
-            generated_text = self.base_model.tokenizer.decode(
-                generated_token_ids, skip_special_tokens=True
-            )
-            finish_reason = self._infer_finish_reason(
-                generated_ids=generated_token_ids,
+            generated_token_ids = [
+                sequences[row_idx][input_ids.shape[1]:].tolist()
+                for row_idx in range(sequences.shape[0])
+            ]
+            return self._finalize_generation_outputs(
+                tokenizer=self.base_model.tokenizer,
+                generated_token_ids=generated_token_ids,
                 eos_token_id=eos_token_id,
                 max_new_tokens=max_new_tokens,
+                inference_mode=inference_mode,
+                use_upstream_prefix=use_upstream_prefix,
+                return_metadata=return_metadata,
             )
-            if return_metadata:
-                return {
-                    "generated_text": generated_text,
-                    "finish_reason": finish_reason,
-                    "generated_token_count": len(generated_token_ids),
-                    "stopped_early": finish_reason != "max_new_tokens",
-                    "inference_mode": inference_mode,
-                    "used_upstream_prefix": use_upstream_prefix,
-                }
-            return generated_text
 
     def __repr__(self) -> str:
         return f"Agent(id={self.agent_id}, role={self.role_name})"
