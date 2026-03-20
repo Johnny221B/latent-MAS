@@ -23,6 +23,7 @@ def load_config(config_path: str | Path) -> dict:
         config = yaml.safe_load(f)
 
     _validate_config(config)
+    _normalize_config(config)
     return config
 
 
@@ -42,3 +43,25 @@ def _validate_config(config: dict):
     graph_path = Path(config["graph"]["config"])
     if not graph_path.exists():
         raise FileNotFoundError(f"Graph config not found: {graph_path}")
+
+
+def _normalize_config(config: dict) -> None:
+    """Backfill compatible defaults and normalize deprecated aliases."""
+    model_cfg = config.setdefault("model", {})
+    model_cfg.setdefault("dtype", "float32")
+
+    training_cfg = config.setdefault("training", {})
+    train_strategy = training_cfg.get("train_strategy")
+    if train_strategy is None:
+        train_strategy = "full_finetune" if training_cfg.get("train_base_model", False) else "communication_only"
+    if train_strategy not in {"communication_only", "full_finetune"}:
+        raise ValueError(
+            "training.train_strategy must be one of "
+            "{'communication_only', 'full_finetune'}"
+        )
+    training_cfg["train_strategy"] = train_strategy
+    training_cfg["train_base_model"] = train_strategy == "full_finetune"
+    training_cfg.setdefault("save_final_checkpoint", True)
+
+    evaluation_cfg = config.setdefault("evaluation", {})
+    evaluation_cfg.setdefault("run_after_train", False)

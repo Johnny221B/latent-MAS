@@ -1,0 +1,57 @@
+model:
+  name: "Qwen/Qwen3-8B"
+  frozen: true
+  dtype: "bfloat16"
+
+graph:
+  config: "configs/graphs/default_5agent.json"
+  roles_dir: "configs/roles"
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+
+training:
+  task: "gsm8k"
+  train_strategy: "full_finetune"
+  input_mode: "chat_with_prefix"
+  batch_size: 32
+  lr: 0.0001
+  weight_decay: 0.01
+  epochs: 64
+  max_seq_len: 2048
+  lambda_add: 0.1
+  lambda_drop: 0.005
+  lambda_sparse: 0.005
+  gradient_accumulation_steps: 1
+  drop_last: false
+  log_interval: 1
+  save_interval: 0
+  save_final_checkpoint: false
+
+reasoning:
+  steps_per_agent: 25
+  compress_last_k: 25
+
+evaluation:
+  run_after_train: true
+  max_new_tokens: 128
+  batch_size: 32
+  train_probe_samples: 64
+  test_probe_samples: 64
+  inference_mode: "chat_with_prefix"
+  use_terminal_prefix: true
+  do_sample: false
+  write_agent_logs: false
+
+output:
+  dir: "outputs/gsm8k_qwen3-8b_probe64_full_finetune"
+  log_dir: "logs"
+
+report:
+  use_wandb: false
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "disabled"

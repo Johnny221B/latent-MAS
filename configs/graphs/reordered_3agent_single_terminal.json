@@ -1,0 +1,11 @@
+{
+    "agents": ["reader", "summarizer", "solver"],
+    "adjacency_prior": [
+        [0, 1, 1],
+        [0, 0, 0],
+        [0, 1, 0]
+    ],
+    "execution_order": [0, 2, 1],
+    "terminal_agent_index": 1,
+    "description": "Single-terminal DAG with explicit execution order reader -> solver -> summarizer"
+}

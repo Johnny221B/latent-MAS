@@ -12,6 +12,15 @@ Extensibility:
 import re
 
 
+def _normalize_numeric_text(value: str) -> str:
+    cleaned = value.replace(",", "").strip()
+    if re.fullmatch(r"-?\d+\.", cleaned):
+        cleaned = cleaned[:-1]
+    if re.fullmatch(r"-?\d+\.0+", cleaned):
+        cleaned = cleaned.split(".", 1)[0]
+    return cleaned
+
+
 def extract_answer(text: str, task_type: str = "gsm8k") -> str:
     """Extract the final answer from generated text.
 
@@ -34,17 +43,17 @@ def _extract_gsm8k(text: str) -> str:
     # Try "#### <number>" pattern first
     match = re.search(r"####\s*(-?[\d,]+\.?\d*)", text)
     if match:
-        return match.group(1).replace(",", "")
+        return _normalize_numeric_text(match.group(1))
 
     # Try "answer is <number>" pattern
     match = re.search(r"answer\s+is\s+(-?[\d,]+\.?\d*)", text, re.IGNORECASE)
     if match:
-        return match.group(1).replace(",", "")
+        return _normalize_numeric_text(match.group(1))
 
     # Fallback: last number in the text
     numbers = re.findall(r"-?[\d,]+\.?\d*", text)
     if numbers:
-        return numbers[-1].replace(",", "")
+        return _normalize_numeric_text(numbers[-1])
 
     return text.strip()
 

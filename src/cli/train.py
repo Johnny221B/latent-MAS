@@ -30,8 +30,14 @@ from torch.optim import AdamW
 from src.utils.config import load_config
 from src.utils.output_paths import build_timestamped_output_dir
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
-from src.utils.training import compute_grad_norm, validate_min_samples_for_batches
+from src.utils.token_utils import append_eos_token
+from src.utils.training import (
+    compute_grad_norm,
+    should_save_checkpoint,
+    validate_min_samples_for_batches,
+)
 from src.pipeline.multi_agent_system import MultiAgentSystem
+from src.cli.evaluate import evaluate_loaded_system
 from data.dataset import create_dataset
 
 
@@ -90,6 +96,8 @@ def cleanup_distributed():
 def train(config_path: str, max_samples: int | None = None):
     config = load_config(config_path)
     training_cfg = config["training"]
+    evaluation_cfg = config.get("evaluation", {})
+    training_input_mode = training_cfg.get("input_mode", "legacy_plain_with_prefix")
 
     # ── Setup device ──
     device, is_ddp = setup_distributed()
@@ -118,6 +126,12 @@ def train(config_path: str, max_samples: int | None = None):
     if is_ddp:
         from torch.nn.parallel import DistributedDataParallel as DDP
 
+        if training_cfg.get("train_strategy") == "full_finetune":
+            system.base_model.model = DDP(
+                system.base_model.model,
+                device_ids=[device.index],
+                find_unused_parameters=True,
+            )
         # Wrap compressor with DDP
         system.compressor = DDP(
             system.compressor,
@@ -135,11 +149,12 @@ def train(config_path: str, max_samples: int | None = None):
         split="train",
         max_samples=max_samples,
     )
+    drop_last = training_cfg.get("drop_last", True)
     validate_min_samples_for_batches(
         dataset_size=len(dataset),
         per_gpu_batch_size=training_cfg["batch_size"],
         world_size=world_size,
-        drop_last=True,
+        drop_last=drop_last,
     )
 
     # DistributedSampler splits data across GPUs
@@ -150,7 +165,7 @@ def train(config_path: str, max_samples: int | None = None):
         shuffle=(sampler is None),
         sampler=sampler,
         collate_fn=collate_fn,
-        drop_last=True,
+        drop_last=drop_last,
     )
 
     if is_main_process():
@@ -171,6 +186,12 @@ def train(config_path: str, max_samples: int | None = None):
     log_interval = training_cfg.get("log_interval", 1)
     save_interval = training_cfg.get("save_interval", 500)
     compressor = system.compressor.module if is_ddp else system.compressor
+    trainable_base_model = training_cfg.get("train_strategy") == "full_finetune"
+    base_model_module = (
+        system.base_model.model.module
+        if is_ddp and trainable_base_model
+        else system.base_model.model
+    )
     adjacency = system.adjacency
     
     # ── Output directory with timestamp ──
@@ -217,9 +238,16 @@ def train(config_path: str, max_samples: int | None = None):
             answer_tokenized = system.base_model.tokenize(
                 batch["answers"],
                 max_length=2048,
+                add_special_tokens=training_input_mode != "chat_with_prefix",
             )
             answer_ids = answer_tokenized["input_ids"].to(device)
             answer_mask = answer_tokenized["attention_mask"].to(device)
+            if training_input_mode == "chat_with_prefix":
+                answer_ids, answer_mask = append_eos_token(
+                    input_ids=answer_ids,
+                    attention_mask=answer_mask,
+                    eos_token_id=system.base_model.tokenizer.eos_token_id,
+                )
 
             t1 = time.time()
 
@@ -313,10 +341,11 @@ def train(config_path: str, max_samples: int | None = None):
                 })
 
             # ── Checkpoint (main process only) ──
-            if is_main_process() and global_step > 0 and global_step % save_interval == 0:
+            if is_main_process() and should_save_checkpoint(global_step=global_step, save_interval=save_interval):
                 ckpt_path = output_dir / f"checkpoint_step{global_step}.pt"
                 torch.save({
                     "step": global_step,
+                    "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
                     "compressor_state": compressor.state_dict(),
                     "adjacency_state": adjacency.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
@@ -357,27 +386,80 @@ def train(config_path: str, max_samples: int | None = None):
                 writer.writeheader()
                 writer.writerows(loss_log)
 
+    eval_summaries = {}
+    if evaluation_cfg.get("run_after_train", False):
+        eval_kwargs = {
+            "config_path": config_path,
+            "output_dir": output_dir,
+            "checkpoint_path": None,
+            "max_new_tokens": evaluation_cfg.get("max_new_tokens", 64),
+            "inference_mode": evaluation_cfg.get("inference_mode", "chat_with_prefix"),
+            "use_terminal_prefix": evaluation_cfg.get("use_terminal_prefix", True),
+            "run_baseline": False,
+            "do_sample": evaluation_cfg.get("do_sample", False),
+            "write_agent_logs": evaluation_cfg.get("write_agent_logs", False),
+            "worker": None,
+            "batch_size": evaluation_cfg.get("batch_size", 1),
+            "device": device,
+            "rank": rank,
+            "world_size": world_size,
+            "is_dist": is_ddp,
+        }
+        for split_name, sample_limit in (
+            ("train", evaluation_cfg.get("train_probe_samples")),
+            ("test", evaluation_cfg.get("test_probe_samples")),
+        ):
+            if is_main_process():
+                print(f"\nStarting post-train evaluation on {split_name} split...")
+            eval_summary = evaluate_loaded_system(
+                system=system,
+                config=config,
+                max_samples=sample_limit,
+                split=split_name,
+                **eval_kwargs,
+            )
+            if is_main_process() and eval_summary is not None:
+                eval_summaries[split_name] = eval_summary
+
     # ── Final save ──
     if is_main_process():
-        final_path = output_dir / "final_model.pt"
-        torch.save({
-            "step": global_step,
-            "compressor_state": compressor.state_dict(),
-            "adjacency_state": adjacency.state_dict(),
-            "config": config,
-        }, final_path)
-        print(f"Training complete. Final model saved to {final_path}")
+        if training_cfg.get("save_final_checkpoint", True):
+            final_path = output_dir / "final_model.pt"
+            torch.save({
+                "step": global_step,
+                "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
+                "compressor_state": compressor.state_dict(),
+                "adjacency_state": adjacency.state_dict(),
+                "config": config,
+            }, final_path)
+            print(f"Training complete. Final model saved to {final_path}")
+        else:
+            print("Training complete. Final checkpoint save disabled by config.")
         log_wandb(
             wandb_run,
             {
                 "final/global_step": global_step,
                 "final/output_dir": str(output_dir),
+                "final/train_accuracy": (
+                    eval_summaries.get("train", {})
+                    .get("metrics", {})
+                    .get("accuracy")
+                ),
+                "final/test_accuracy": (
+                    eval_summaries.get("test", {})
+                    .get("metrics", {})
+                    .get("accuracy")
+                ),
             },
             step=global_step,
         )
     finish_wandb(wandb_run)
 
     cleanup_distributed()
+    return {
+        "output_dir": str(output_dir),
+        "eval_summaries": eval_summaries if is_main_process() else None,
+    }
 
 
 if __name__ == "__main__":

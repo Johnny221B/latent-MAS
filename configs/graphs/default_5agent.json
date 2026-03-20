@@ -7,6 +7,7 @@
         [0, 0, 0, 0, 1],
         [0, 0, 0, 0, 0]
     ],
+    "execution_order": [0, 1, 2, 3, 4],
     "terminal_agent_index": 4,
     "description": "Two-path graph: reader->planner->solver->summarizer and reader->analyst->summarizer"
 }

@@ -36,6 +36,7 @@ class GraphLoss(nn.Module):
         self,
         adjacency: torch.Tensor,
         prior: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute graph regularization loss.
 
@@ -54,8 +55,14 @@ class GraphLoss(nn.Module):
         non_prior_mask = ~prior_mask       # edges that don't exist in classical config
 
         # Also exclude diagonal and lower triangle (these are always -inf in logits)
-        n = adjacency.shape[0]
-        valid_mask = torch.triu(torch.ones(n, n, device=adjacency.device, dtype=torch.bool), diagonal=1)
+        if valid_mask is None:
+            n = adjacency.shape[0]
+            valid_mask = torch.triu(
+                torch.ones(n, n, device=adjacency.device, dtype=torch.bool),
+                diagonal=1,
+            )
+        else:
+            valid_mask = valid_mask.to(device=adjacency.device, dtype=torch.bool)
 
         # L_add: sum of adjacency weights on non-prior, valid edges
         add_mask = non_prior_mask & valid_mask

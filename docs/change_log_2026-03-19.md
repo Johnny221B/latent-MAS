@@ -165,3 +165,29 @@ uv run --python .venv/bin/python ...
 - 完成了环境、训练、评测、baseline、wandb、目录结构和 shell 入口的一整套工程化整理。
 - 支持使用 `uv`、双卡训练、双卡分片评测、统一 pipeline 脚本、以及更完整的结果 JSON。
 - 已经将训练与推理中若干关键元信息显式记录下来，便于后续分析与复现。
+
+## 14. Probe64 修复与实验闭环
+
+- 为 `probe64` 增加了真正的“训练后直接评测”闭环，不再依赖 checkpoint：
+  - `src/cli/evaluate.py` 新增 `evaluate_loaded_system()`
+  - `src/cli/train.py` 可在训练结束后直接对内存中的模型做 train/test eval
+- 对 `probe64` 配置显式加入：
+  - `training.save_final_checkpoint: false`
+  - `evaluation.run_after_train: true`
+  - `evaluation.write_agent_logs: false`
+- 修复了 DDP 下 terminal generation 的直接调用问题：
+  - `src/models/agent.py` 现在会对 `generate()` 使用 unwrapped helper model
+- 新增/扩展测试覆盖：
+  - `tests/test_evaluate_streaming.py`
+  - `tests/test_agent_generation.py`
+  - `tests/test_config.py`
+- 已完成 3 轮 `probe64` 实验，均不落 checkpoint，只保留轻量文件：
+- 已完成 4 轮 probe 实验，均不落 checkpoint，只保留轻量文件：
+- 已完成 5 轮实验，均不落 checkpoint，只保留轻量文件：
+  - communication-only: `train 3.12%`, `test 1.56%`
+  - full-finetune aggressive: `train 100%`, `test 3.12%`
+  - full-finetune low-lr short-run: `train 12.50%`, `test 15.62%`
+  - larger-sample full-finetune: `train 11.91%` on `512`, `test 13.28%` on `256`
+  - full-data full-finetune: `train 34.60%` on `7473`, `test 26.76%` on `1319`
+- 详细版本结果已单独记录到：
+  - `docs/probe64_experiment_log_2026-03-19.md`

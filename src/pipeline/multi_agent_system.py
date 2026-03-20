@@ -28,7 +28,10 @@ import torch.nn as nn
 from ..models.base_model import BaseModelWrapper
 from ..models.compressor import LatentCompressor
 from ..models.agent import Agent
-from ..graph.adjacency import LearnableAdjacency
+from ..graph.adjacency import (
+    LearnableAdjacency,
+    validate_graph_topology,
+)
 from ..graph.dag_executor import DAGExecutor
 from ..communication.aggregator import MessageAggregator
 from ..losses.task_loss import TaskLoss
@@ -54,13 +57,23 @@ class MultiAgentSystem(nn.Module):
         self.agent_roles = graph_config["agents"]
         self.n_agents = len(self.agent_roles)
         self.terminal_agent_index = graph_config["terminal_agent_index"]
+        self.execution_order = graph_config.get("execution_order", list(range(self.n_agents)))
+        self.training_input_mode = config.get("training", {}).get("input_mode", "legacy_plain_with_prefix")
         prior = torch.tensor(graph_config["adjacency_prior"], dtype=torch.float32)
+        allowed_edges_mask = validate_graph_topology(
+            prior=prior,
+            execution_order=self.execution_order,
+            terminal_agent_index=self.terminal_agent_index,
+        )
 
         # ── Load base model (frozen, shared) ──
         self.base_model = BaseModelWrapper(
             model_name=config["model"]["name"],
             cache_dir=config["model"].get("cache_dir"),
+            dtype=config["model"].get("dtype"),
         )
+        if config.get("training", {}).get("train_strategy") == "full_finetune":
+            self.base_model.set_trainable(True)
         hidden_dim = self.base_model.hidden_dim
 
         # ── Create agents ──
@@ -100,7 +113,10 @@ class MultiAgentSystem(nn.Module):
         )
 
         # ── Trainable: Adjacency ──
-        self.adjacency = LearnableAdjacency(prior=prior)
+        self.adjacency = LearnableAdjacency(
+            prior=prior,
+            allowed_edges_mask=allowed_edges_mask,
+        )
 
         # ── Executor (stateless) ──
         self.executor = DAGExecutor(aggregator=MessageAggregator())
@@ -154,6 +170,9 @@ class MultiAgentSystem(nn.Module):
             use_terminal_prefix=use_terminal_prefix,
             do_sample=do_sample,
             collect_agent_logs=collect_agent_logs,
+            execution_order=self.execution_order,
+            terminal_agent_index=self.terminal_agent_index,
+            training_input_mode=self.training_input_mode,
         )
 
         result = {"adjacency": A}
@@ -171,7 +190,11 @@ class MultiAgentSystem(nn.Module):
             )
 
             task_loss = self.task_loss_fn(final_logits, labels)
-            graph_loss_dict = self.graph_loss_fn(A, self.adjacency.prior)
+            graph_loss_dict = self.graph_loss_fn(
+                A,
+                self.adjacency.prior,
+                valid_mask=self.adjacency.allowed_edges_mask,
+            )
             total_loss = task_loss + graph_loss_dict["loss"]
 
             result.update({
@@ -194,6 +217,8 @@ class MultiAgentSystem(nn.Module):
     def get_trainable_params(self) -> list[nn.Parameter]:
         """Return only the trainable parameters (for optimizer)."""
         params = []
+        if self.config.get("training", {}).get("train_strategy") == "full_finetune":
+            params.extend(self.base_model.model.parameters())
         params.extend(self.compressor.parameters())
         params.extend(self.adjacency.parameters())
         return params

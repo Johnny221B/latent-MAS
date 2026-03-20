@@ -8,7 +8,7 @@ This test uses a TINY randomly initialized model (not real weights) to verify:
 4. Terminal agent: forward → logits for CE loss
 5. Loss computation (task + graph + sparse) produces a scalar
 6. backward() runs and gradients flow to compressor + adjacency only
-7. Adjacency normalization in aggregator works correctly
+7. Aggregator uses direct weighted sums and still preserves gradient flow
 
 Usage:
     python tests/test_e2e.py
@@ -142,6 +142,7 @@ class TinyLM(nn.Module):
 
     def forward(self, inputs_embeds, attention_mask=None, output_hidden_states=False,
                 use_cache=False, past_key_values=None, **kwargs):
+        batch_size, seq_len, _ = inputs_embeds.shape
         h = inputs_embeds
         all_hidden = [h] if output_hidden_states else None
 
@@ -157,7 +158,13 @@ class TinyLM(nn.Module):
 
         logits = self.lm_head(h)
 
-        fake_kv = [(torch.zeros(1), torch.zeros(1))] * len(self.layers) if use_cache else None
+        fake_kv = [
+            (
+                torch.zeros(batch_size, 1, seq_len, self.hidden_dim),
+                torch.zeros(batch_size, 1, seq_len, self.hidden_dim),
+            )
+            for _ in self.layers
+        ] if use_cache else None
 
         return type("Output", (), {
             "logits": logits,
@@ -339,8 +346,8 @@ def test_e2e():
     assert not frozen_has_grad, "Frozen model should NOT receive gradients!"
     print("  ✓ Gradient flow verified")
 
-    # ── Step 7: Verify aggregator normalization ──
-    print("\n[7/7] Verifying aggregator normalization...")
+    # ── Step 7: Verify aggregator weighted sum ──
+    print("\n[7/7] Verifying aggregator weighted sum...")
     agg = MessageAggregator()
     P0 = torch.randn(2, 4, hidden_dim)
     P1 = torch.randn(2, 4, hidden_dim)
@@ -357,11 +364,10 @@ def test_e2e():
         adjacency=test_adj,
         all_prefixes=[P0, None, P1, P1, None],
     )
-    # Check that the result is normalized (equivalent to weighted average)
-    expected = (0.8 * P0 + 0.6 * P1 + 0.9 * P1) / (0.8 + 0.6 + 0.9)
-    assert torch.allclose(z, expected, atol=1e-5), "Aggregator normalization failed!"
-    print(f"  Weights: [0.8, 0.6, 0.9], sum={0.8+0.6+0.9}")
-    print(f"  Normalized correctly: ✓")
+    expected = 0.8 * P0 + 0.6 * P1 + 0.9 * P1
+    assert torch.allclose(z, expected, atol=1e-5), "Aggregator weighted sum failed!"
+    print(f"  Weights: [0.8, 0.6, 0.9]")
+    print("  Weighted sum correctly: ✓")
 
     # ── Summary ──
     print("\n" + "=" * 60)
