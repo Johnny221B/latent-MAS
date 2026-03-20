@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # 读取 csv
-df = pd.read_csv("/data2/yangyz/latent-MAS/outputs/gsm8k_qwen3-0.6b_20260317_225851/loss_log.csv")
+df = pd.read_csv("/data2/yangyz/latent-MAS/outputs/gsm8k_qwen3-0.6b_20260318_114558/loss_log.csv")
 
 # 按 epoch 聚合，计算每个 epoch 的平均 loss
 epoch_loss = df.groupby("epoch")[["loss", "task_loss", "graph_loss"]].mean().reset_index()

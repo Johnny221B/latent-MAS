@@ -99,6 +99,7 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
                 task_attention_mask=task_mask,
             )
 
+            # 获取完整的生成文本（不要截断！）
             generated_text = output["generated_text"]
 
             # Extract and compare answer
@@ -112,11 +113,12 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
 
             t1 = time.time()
 
+            # 保存到 JSON 时也保存完整的文本，方便你跑完后慢慢用脚本分析
             results.append({
                 "question": batch["questions"][0],
                 "gold": gold,
                 "prediction": pred,
-                "generated_text": generated_text[:500],
+                "generated_text": generated_text,  # <--- 去掉了 [:500]
                 "correct": is_correct,
             })
 
@@ -129,14 +131,20 @@ def evaluate(config_path: str, checkpoint_path: str, max_samples: int | None = N
                     f"{t1-t0:.1f}s/sample"
                 )
 
-            # Print some examples
+            # 强力建议：打印前 5 个（或任意你想看的数量）的【完整】推理过程
             if idx < 5:
                 status = "✓" if is_correct else "✗"
-                print(f"\n  Example {idx+1} [{status}]:")
-                print(f"    Q: {batch['questions'][0][:100]}...")
-                print(f"    Gold: {gold}")
-                print(f"    Pred: {pred}")
-                print(f"    Gen:  {generated_text[:200]}")
+                print(f"\n{'='*40}")
+                print(f"  Example {idx+1} [{status}]")
+                print(f"{'='*40}")
+                print(f"  [Question]:\n{batch['questions'][0]}")
+                print(f"  [Gold Answer]: {gold}")
+                print(f"  [Extracted Pred]: {pred}")
+                print(f"\n  [Terminal Agent Full Reasoning]:")
+                print(f"  {'-'*36}")
+                # 打印完整文本，你可以清楚看到模型有没有破防
+                print(f"{generated_text}")
+                print(f"  {'-'*36}\n")
 
     # ── Summary ──
     t_total = time.time() - t_start
