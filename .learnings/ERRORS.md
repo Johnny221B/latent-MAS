@@ -170,3 +170,32 @@ Prefer project-local or otherwise writable worktree locations for sessions that 
 - Related Files: .learnings/ERRORS.md
 
 ---
+
+## [ERR-20260320-002] git-checkout
+
+**Logged**: 2026-03-20T00:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+Branch checkout failed in the sandbox because git could not create `index.lock`.
+
+### Error
+```text
+fatal: Unable to create '/home/chengzhi.ucsb/code/toby/latent-MAS/.git/index.lock': Read-only file system
+```
+
+### Context
+- Command/operation attempted: `git checkout toby`
+- Input or parameters used: switch from `fix/probe-live-eval-fulltrain` to `toby` after committing docs changes
+- Environment details if relevant: repository content is writable, but this branch switch required git metadata writes that the current sandbox denied
+
+### Suggested Fix
+Rerun the checkout with escalated permissions when branch switching is required for the task.
+
+### Metadata
+- Reproducible: yes
+- Related Files: .learnings/ERRORS.md
+
+---
