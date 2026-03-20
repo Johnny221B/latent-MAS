@@ -81,6 +81,18 @@ def _extract_arc_answer(answer_key: str) -> str:
     """ARC answers are just the letter key (A/B/C/D)."""
     return str(answer_key).strip()
 
+def _extract_math_answer(solution_text: str) -> str:
+    """Extract the boxed answer from MATH dataset solutions.
+    
+    MATH answers are formatted as \\boxed{answer}.
+    """
+    import re
+    # Look for \boxed{...}
+    match = re.search(r'\\boxed\{([^}]*)\}', solution_text)
+    if match:
+        return match.group(1).strip()
+    # Fallback: last line
+    return solution_text.strip().split('\n')[-1].strip()
 
 # ── Task Registry ──
 TASK_CONFIGS = {
@@ -104,6 +116,13 @@ TASK_CONFIGS = {
         "question_field": "question",
         "answer_field": "answerKey",
         "answer_extractor": _extract_arc_answer,
+    },
+    "math": {
+        "dataset": "hendrycks/competition_math",
+        "subset": None,
+        "question_field": "problem",
+        "answer_field": "solution",
+        "answer_extractor": _extract_math_answer,
     },
 }
 

@@ -64,6 +64,19 @@ def _extract_arc(text: str) -> str:
     return text.strip()[:1].upper()
 
 
+def _extract_math(text: str) -> str:
+    """Extract answer from MATH-style output with \\boxed{}."""
+    import re
+    match = re.search(r'\\boxed\{([^}]*)\}', text)
+    if match:
+        return match.group(1).strip()
+    # Try "answer is" pattern
+    match = re.search(r'answer\s+is\s+(.+?)(?:\.|$)', text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return text.strip().split('\n')[-1].strip()
+
+
 def _extract_default(text: str) -> str:
     """Default: return stripped text."""
     return text.strip()
@@ -76,4 +89,5 @@ EXTRACTORS = {
     "arc_easy": _extract_arc,
     "arc_challenge": _extract_arc,
     "medqa": _extract_arc,  # also multiple choice
+    "math": _extract_math,
 }

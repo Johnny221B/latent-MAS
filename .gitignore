@@ -1,6 +1,7 @@
 # ── Environment & Weights (large files, local only) ──
 envs/
 weights/
+baseline/
 
 # ── Python ──
 __pycache__/
@@ -33,6 +34,7 @@ Thumbs.db
 
 # ── Training outputs ──
 outputs/
+
 logs/
 wandb/
 *.pt
