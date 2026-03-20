@@ -57,7 +57,7 @@
   - 双卡 DDP 训练
   - 训练后直接做双卡 live eval
   - 不落 checkpoint 文件，只保留轻量日志与结果 JSON
-- 当前状态：已完成 3 轮实验，结果见 `docs/probe64_experiment_log_2026-03-19.md`
+- 当前状态：已完成 3 轮实验，结果见 `docs/records/experiments/probe64_experiment_log_2026-03-19.md`
 
 ## 仍未解决 / 需继续观察
 

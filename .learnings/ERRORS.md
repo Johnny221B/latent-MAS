@@ -141,3 +141,32 @@ Split large documentation edits into smaller file-specific patches after re-read
 - Related Files: docs/current_version_issues_2026-03-19.md, docs/change_log_2026-03-19.md
 
 ---
+## [ERR-20260320-001] using-git-worktrees
+
+**Logged**: 2026-03-20T00:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: docs
+
+### Summary
+Global git worktree creation succeeded, but subsequent file mutations in that worktree failed under sandbox permissions.
+
+### Error
+```text
+mkdir: cannot create directory ‘docs/reference’: Read-only file system
+mkdir: cannot create directory ‘docs/records’: Read-only file system
+```
+
+### Context
+- Command/operation attempted: create docs subdirectories and move docs files inside `~/.config/superpowers/worktrees/latent-MAS/docs-train-pipeline-refresh`
+- The repository worktree lives outside the writable roots available to this Codex session
+- The task requires editing tracked files, so the worktree became unusable for implementation under current sandbox constraints
+
+### Suggested Fix
+Prefer project-local or otherwise writable worktree locations for sessions that must edit files, or fall back to the original writable workspace when the chosen global worktree path is sandbox read-only.
+
+### Metadata
+- Reproducible: yes
+- Related Files: .learnings/ERRORS.md
+
+---

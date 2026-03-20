@@ -33,9 +33,9 @@
   - [tests/test_config.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/tests/test_config.py)
   - [tests/test_evaluate_streaming.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/tests/test_evaluate_streaming.py)
 - 更新了版本记录与实验记录：
-  - [docs/change_log_2026-03-19.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/change_log_2026-03-19.md)
-  - [docs/current_version_issues_2026-03-19.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/current_version_issues_2026-03-19.md)
-  - [docs/probe64_experiment_log_2026-03-19.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/probe64_experiment_log_2026-03-19.md)
+  - [change_log_2026-03-19.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/records/changes/change_log_2026-03-19.md)
+  - [current_version_issues_2026-03-19.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/records/issues/current_version_issues_2026-03-19.md)
+  - [probe64_experiment_log_2026-03-19.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/records/experiments/probe64_experiment_log_2026-03-19.md)
 
 ## 2. 实验结果
 

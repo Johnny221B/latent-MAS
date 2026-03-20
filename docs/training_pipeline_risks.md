@@ -1,254 +1,76 @@
 # Latent-MAS 训练流程潜在问题分析
 
-## 1. 文档目的
+本文档只记录当前版本仍然有效、且会影响实验判断或工程扩展的风险。已经修复的历史问题应放到 `docs/records/`，不再留在这里冒充当前风险。
 
-本文档用于记录当前训练流程中已经能够从代码和实际运行中观察到的潜在问题。这里讨论的不是“代码风格”层面的瑕疵，而是那些可能影响：
+## 1. 图结构学习信号仍然偏弱
 
-- 图结构是否真的能学起来
-- 训练速度与显存效率
-- 训练目标是否和预期一致
-- 系统是否容易在扩展到更大实验时失效
+当前消息聚合已经改成加权求和，不再有旧版归一化的直接缺陷；但从最近几轮实验看，adjacency 仍然经常停留在先验附近，说明：
 
-这些问题大体可以分成两类：
+- 图结构学习信号依然偏弱
+- 很多性能变化更可能来自 backbone 或 compressor
+- “learnable graph” 是否真的学到任务相关协作，仍需谨慎解读
 
-- 方法层面的风险
-- 工程实现层面的风险
+这属于方法风险，不是简单代码 bug。
 
-## 2. 最核心的问题：adjacency 可能学不动
+## 2. `communication_only` 与 `full_finetune` 的结论不能混写
 
-### 2.1 问题位置
+当前版本支持两种训练策略：
 
-文件：[aggregator.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/communication/aggregator.py)
+- `communication_only`
+- `full_finetune`
 
-当前消息聚合公式是：
+如果不显式注明配置，实验结论很容易被误读。例如：
 
-$$
-z_j = \frac{\sum_{i<j} A_{ij} P_i}{\sum_{i<j} A_{ij} + \epsilon}
-$$
+- `communication_only` 的差结果，不能直接证明 latent communication 无效
+- `full_finetune` 的提升，也不能自动归因于图结构学习成功
 
-其中：
+因此所有实验汇总都必须同时写清：
 
-- $A_{ij}$ 是第 $i \to j$ 条边的权重
-- $P_i$ 是上游 agent 的 latent prefix
-- $z_j$ 是下游 agent 接收到的聚合消息
+- train strategy
+- 样本规模
+- train/test split
+- 是否使用 terminal prefix
 
-### 2.2 为什么这是个问题
+## 3. 小样本 probe 极易把 memorization 和 generalization 混为一谈
 
-如果某个节点只有一个上游节点，那么上式会退化为：
+最近的 `probe64` 结果已经表明：
 
-$$
-z_j \approx \frac{A_{ij} P_i}{A_{ij}} = P_i
-$$
+- same-split accuracy 可能很高
+- held-out test accuracy 可能仍然很差
 
-也就是说，在单入边情况下：
+因此在小样本场景下，`train` 与 `test` 指标必须分开记录。只看一个数字会直接导致错误结论。
 
-- 输出几乎与边权 $A_{ij}$ 无关
-- 任务损失 $L_{\text{task}}$ 很难对该边产生有效梯度
+## 4. `chat_with_prefix` 是主路径，旧 plain 路径只能做诊断
 
-这会导致一个很直接的后果：
+当前目标评测路径应以 `chat_with_prefix` 为主。历史上的 `legacy_plain_with_prefix` 只适合作为局部对照，不应再被当成最终口径，否则会造成：
 
-- 某些边虽然名义上是 learnable adjacency
-- 但实际上很可能主要只受到图正则项影响
-- 而不是受到任务损失驱动去学习
+- train/eval prompt 形态不一致
+- 文档与生产评测路径不一致
+- 指标不可比较
 
-### 2.3 当前现象与这一分析是一致的
+## 5. Full-finetune 资源成本仍然很高
 
-在实际训练测试中，loss 会下降，但 adjacency 基本保持在初始化附近，几乎没有明显变化。这与“边权主要由正则控制，而不是由任务目标驱动”这一判断是相符的。
+当前 full-finetune 在双卡下依然有很高的显存和时间成本。即使 pipeline 已经支持无 checkpoint live eval，这也只解决了磁盘压力，没有解决：
 
-### 2.4 风险总结
+- backbone 训练成本高
+- DDP 额外开销仍在
+- 大规模超参搜索代价过高
 
-这意味着当前系统里的“可学习图结构”可能并没有真正学到任务相关通信，而只是看起来可学习。
+因此如果后续目标是持续迭代指标，仍应认真评估更轻量的适配方式。
 
-这是目前最值得优先怀疑的结构性问题。
+## 6. `find_unused_parameters=True` 仍带来额外开销
 
-## 3. 第二个问题：基础模型强制用 float32
+当前 DDP 仍保留了比较保守的 `find_unused_parameters=True`。这不会直接导致错误，但会带来额外 autograd 遍历和性能损耗。它不是 blocker，但属于长期应清理的训练效率问题。
 
-### 3.1 问题位置
+## 7. Live eval 减少了磁盘压力，但提高了文档同步要求
 
-文件：[base_model.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/base_model.py)
+训练后直接复用内存中的 `system` 做评测，已经是当前版本的重要事实。它的好处是：
 
-当前加载模型时写死了：
+- 不必强制保存 `final_model.pt`
+- probe 运行更轻
 
-```python
-torch_dtype=torch.float32
-```
+但它也意味着：
 
-### 3.2 为什么这是个问题
-
-当前系统的基础模型是冻结的。对于冻结模型来说，强制使用 `float32` 往往不是最优选择，因为：
-
-- 显存开销更大
-- 前向速度更慢
-- 多卡训练时吞吐更低
-
-对你现在的 `Qwen3-0.6B` 来说，这还不一定立刻变成 blocker，但如果后续：
-
-- 模型更大
-- batch 更大
-- latent reasoning 步数更长
-
-那么这个决定会很快成为性能瓶颈。
-
-### 3.3 风险总结
-
-当前实现可运行，但扩展性偏弱。更准确地说，当前训练流程是“功能正确但计算配置偏保守”。
-
-## 4. 第三个问题：reasoning_steps 默认值存在冲突
-
-### 4.1 问题位置
-
-文件：[agent.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/agent.py)
-
-当前初始化里有两次赋值：
-
-```python
-self.reasoning_steps = role_config.get("reasoning_steps", 4)
-...
-self.reasoning_steps = role_config.get("reasoning_steps", 256)
-```
-
-### 4.2 为什么这是个问题
-
-这意味着前一次赋值完全被后一次覆盖。
-
-在当前默认配置中，因为 role config 和 experiment config 都显式给了 `reasoning_steps`，所以这个 bug 没有立即暴露。但一旦未来出现：
-
-- 某个 role config 漏掉字段
-- 某个实验忘记覆盖推理步数
-
-那么默认行为会 silently 变成 `256`，而不是前面看起来想表达的 `4`。
-
-### 4.3 风险总结
-
-这是一个典型的“现在没炸，但以后很容易制造错误实验”的隐性 bug。
-
-## 5. 第四个问题：答案长度上限被硬编码
-
-### 5.1 问题位置
-
-文件：
-
-- [multi_train.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/multi_train.py)
-- [train.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/train.py)
-
-当前答案 tokenization 使用：
-
-```python
-max_length=128
-```
-
-### 5.2 为什么这是个问题
-
-这表示训练目标实际上是：
-
-$$
-y' = \mathrm{Truncate}(y, 128)
-$$
-
-也就是说，模型并不是在学习完整答案，而是在学习截断后的答案。
-
-对于当前 GSM8K 设置，由于答案提取后大多很短，这个问题暂时不严重。但如果未来：
-
-- 监督目标改成完整解释
-- 使用更长格式的答案
-- 换成长输出任务
-
-那么这里会静默改变训练语义，而不是显式报错。
-
-### 5.3 风险总结
-
-当前问题不一定影响现在的实验，但它是一个明显的可扩展性风险。
-
-## 6. 第五个问题：监督只落在最终答案，结构可辨识性较弱
-
-### 6.1 当前训练目标
-
-当前总损失是：
-
-$$
-L = L_{\text{task}} + L_{\text{graph}}
-$$
-
-其中：
-
-- $L_{\text{task}}$ 只监督终端答案 token
-- $L_{\text{graph}}$ 只对图结构做先验约束
-
-### 6.2 为什么这会带来风险
-
-中间 agent 的 latent reasoning 不直接受监督，非终端 agent 的推理过程又在 `torch.no_grad()` 中运行。因此系统真正能学到的主要是：
-
-- prefix 如何压缩
-- 哪些边被保留或削弱
-
-而不是“让 latent reasoning 本身变得更好”。
-
-于是会出现一种可能性：
-
-- 最终 loss 下降
-- 但图结构变化很小
-- 中间 agent 是否真的协作、是否真的形成互补功能，其实不容易从训练目标中被辨别出来
-
-### 6.3 风险总结
-
-这不是简单的代码 bug，而是方法层面的 identifiability 问题。当前训练目标对“通信是否真的有用”这件事的约束可能还不够强。
-
-## 7. 第六个问题：DDP 配置显示当前实现有额外开销
-
-### 7.1 现象
-
-实际运行时，PyTorch 给出 warning：
-
-```text
-find_unused_parameters=True was specified ... but did not find any unused parameters
-```
-
-### 7.2 含义
-
-这说明当前 DDP 包装采取了偏保守配置。它不会导致训练结果错误，但会：
-
-- 增加一次额外的 autograd 图遍历
-- 降低训练效率
-
-### 7.3 风险总结
-
-这是一个性能问题，不是功能性错误。但在大规模实验中，这类额外开销会持续累积。
-
-## 8. 第七个问题：很多实验现象可能会被误读
-
-当前系统里有一种很容易发生的误判：
-
-- loss 在下降
-- 所以会直觉上认为 latent graph 学到了合理结构
-
-但实际上，这个结论并不一定成立。因为 loss 下降可能主要来自：
-
-- compressor 在学
-- 终端 agent 前缀 conditioning 起作用
-- 而 adjacency 本身并没有有效被任务损失驱动
-
-也就是说：
-
-$$
-\text{loss下降} \not\Rightarrow \text{图结构学到了有效通信}
-$$
-
-这在研究解释层面是一个很重要的风险。
-
-## 9. 当前最值得优先验证的问题
-
-如果按照优先级排序，我认为最值得优先验证的是：
-
-1. adjacency 在当前聚合公式下到底能不能从任务损失获得有效梯度
-2. adjacency 不变到底是方法本身导致，还是当前默认图结构已经过强
-3. compressor 是否承担了几乎全部可学习能力
-
-这三件事决定了当前系统到底是不是一个“真的学通信结构”的系统。
-
-## 10. 简短结论
-
-当前训练流程从“能不能跑”的角度看已经成立，但从“方法是否真按设计发挥作用”的角度看，至少有一个非常关键的潜在问题：
-
-当前归一化聚合公式可能让单入边节点上的 adjacency 几乎拿不到任务梯度，从而使图学习退化为主要受正则控制。
-
-如果这个判断成立，那么当前系统最核心的“learnable graph”部分在训练中其实并没有真正发挥出应有作用。
+- README 不能再把 checkpoint 当成必有产物
+- 结果解释必须看 `eval_results*.json`
+- 文档一旦不更新，就会很快和运行事实脱节

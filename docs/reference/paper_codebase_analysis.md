@@ -6,7 +6,7 @@
 
 当前分析主要基于：
 
-- 本地论文文件：[paper.pdf](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/doc/paper.pdf)
+- 本地论文文件：[paper.pdf](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/reference/paper.pdf)
 - arXiv 摘要页面
 - 当前仓库核心实现文件
 

@@ -53,14 +53,19 @@ NPROC_PER_NODE=2 bash scripts/train.sh --config configs/experiments/gsm8k_5agent
 
 训练输出会写到 `outputs/<timestamp_dir>/`，目录中通常包含：
 - `config.yaml`
-- `final_model.pt`
 - `loss_log.csv`
+- `eval_results*.json`（如果启用 post-train live eval）
+
+当 `training.save_final_checkpoint=true` 时，目录中还会包含：
+- `final_model.pt`
 
 ## Evaluate Ours
 
-`ours` 的评测脚本会直接读取 checkpoint 目录里的：
+如果你使用独立 checkpoint eval，`ours` 的评测脚本会读取目录里的：
 - `config.yaml`
 - `final_model.pt`
+
+如果你使用训练后的 live eval，则结果会直接写到 output 目录，不要求存在 `final_model.pt`。
 
 示例：
 
@@ -134,7 +139,7 @@ outputs/baselines/
 ## Project Structure
 
 - `configs/`：角色定义、图结构先验、实验配置
-- `doc/`：项目说明、论文分析、训练流程文档
+- `docs/`：主文档、参考资料、records、plans
 - `docs/plans/`：调试和执行计划文档
 - `src/cli/`：训练、评测、baseline 的 Python 入口
 - `src/models/`：基础模型封装、agent、compressor

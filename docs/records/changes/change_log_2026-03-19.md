@@ -13,11 +13,11 @@
 
 ## 2. 文档与论文资料
 
-- 下载原始论文 PDF，并保存为 `doc/paper.pdf`。
+- 下载原始论文 PDF，并保存为 `docs/reference/paper.pdf`。
 - 产出并整理了以下文档：
-  - `doc/paper_codebase_analysis.md`
-  - `doc/training_pipeline.md`
-  - `doc/training_pipeline_risks.md`
+  - `docs/reference/paper_codebase_analysis.md`
+  - `docs/training_pipeline.md`
+  - `docs/training_pipeline_risks.md`
 - 将训练流程文档改为中文表述，并补充了可渲染的数学公式。
 - 新增本文档，用于统一记录本次改动历史。
 
@@ -26,7 +26,7 @@
 - 使用 `uv` 为仓库创建并维护 `.venv` 环境。
 - 新增 `.python-version`，固定 Python 版本。
 - 更新 `requirements.txt`，补充训练、测试、PDF 解析、wandb 等依赖。
-- 修复了 PDF 读取环境缺少依赖的问题，支持读取 `doc/paper.pdf`。
+- 修复了 PDF 读取环境缺少依赖的问题，支持读取 `docs/reference/paper.pdf`。
 - 统一约定通过 `HF_HOME` 使用默认 Hugging Face 缓存目录，而不是在配置里硬编码本地模型目录。
 
 ## 4. 训练配置与训练链路
@@ -190,4 +190,4 @@ uv run --python .venv/bin/python ...
   - larger-sample full-finetune: `train 11.91%` on `512`, `test 13.28%` on `256`
   - full-data full-finetune: `train 34.60%` on `7473`, `test 26.76%` on `1319`
 - 详细版本结果已单独记录到：
-  - `docs/probe64_experiment_log_2026-03-19.md`
+  - `docs/records/experiments/probe64_experiment_log_2026-03-19.md`

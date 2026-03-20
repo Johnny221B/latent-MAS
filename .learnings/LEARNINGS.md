@@ -85,7 +85,7 @@ After each experiment milestone, keep only the files still needed for the next s
 
 ### Metadata
 - Source: user_feedback
-- Related Files: outputs, docs/change_log_2026-03-19.md
+- Related Files: outputs, docs/records/changes/change_log_2026-03-19.md
 - Tags: disk, cleanup, experiment_artifacts
 
 ---
@@ -177,7 +177,31 @@ Whenever running tiny-data probe experiments, always record both train-split and
 
 ### Metadata
 - Source: conversation
-- Related Files: docs/probe64_experiment_log_2026-03-19.md, outputs/gsm8k_qwen3-8b_probe64_full_finetune_20260319_152513
+- Related Files: docs/records/experiments/probe64_experiment_log_2026-03-19.md, outputs/gsm8k_qwen3-8b_probe64_full_finetune_20260319_152513
 - Tags: overfitting, evaluation, probe64
+
+---
+
+## [LRN-20260320-001] best_practice
+
+**Logged**: 2026-03-20T00:00:00Z
+**Priority**: high
+**Status**: promoted
+**Area**: docs
+
+### Summary
+Major train/eval version changes must update the main docs and docs index in the same work session.
+
+### Details
+The repository had accumulated important runtime changes in `train.py`, `evaluate.py`, configs, and output behavior, but the canonical docs still mixed current facts with dated logs and older execution descriptions. The durable rule is: when a major version changes train flow, eval flow, config semantics, logging shape, or output artifacts, update the canonical docs immediately instead of leaving the truth split across session reports and experiment logs.
+
+### Suggested Action
+Keep `docs/training_pipeline.md`, `docs/method.md`, companion docs, and `docs/README.md` synchronized with runtime behavior after every major version change. Keep dated logs under `docs/records/`.
+
+### Metadata
+- Source: user_feedback
+- Related Files: AGENTS.md, docs/README.md, docs/training_pipeline.md, docs/method.md
+- Tags: docs, maintenance, process
+- Promoted: AGENTS.md
 
 ---

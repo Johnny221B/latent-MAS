@@ -5,7 +5,7 @@
 - 多 agent 的串行执行顺序
 - 非终端 agent 的 latent reasoning 与 prefix 压缩
 - 终端 agent 在 training / eval 下的不同路径
-- `--no-terminal-prefix` 对最终推理路径的影响
+- `use_terminal_prefix` 对最终推理路径的影响
 
 ## 1. Overall Workflow
 
@@ -37,13 +37,13 @@ flowchart TD
     T -->|Training| U[forward_for_loss]
     U --> V[Compute Task Loss]
     V --> W[Add Graph Loss]
-    W --> X[Backprop to Compressor and Adjacency]
+    W --> X[Backprop to Trainable Params]
 
     T -->|Evaluation| Y[generate_answer]
     Y --> Z[Decode Generated Text]
     Z --> AA[Extract Final Prediction]
-    AA --> AB[Write eval_results.json]
-    AA --> AC[Write agent_logs.json]
+    AA --> AB[Write eval_results*.json]
+    AA --> AC[Optionally Write agent_logs*.json]
 ```
 
 ## 2. Non-Terminal Agent Workflow
@@ -70,13 +70,13 @@ flowchart LR
 
 ## 3. Terminal Agent Workflow
 
-终端 agent 是整个系统里最关键的分叉点，因为 training 和 eval 的处理方式不同。
+终端 agent 是最关键的分叉点，因为 training 和 eval 的处理方式不同。
 
 ```mermaid
 flowchart TD
     A[Terminal Agent Receives Aggregated Prefix] --> B{Training or Eval}
 
-    B -->|Training| C[Build Input: prefix + role prompt + question + answer]
+    B -->|Training| C[Build Prompt and Answer Inputs]
     C --> D[forward_for_loss]
     D --> E[Return Logits]
     E --> F[Compute CE Task Loss]
@@ -84,18 +84,20 @@ flowchart TD
     B -->|Eval| G[Build Generation Input]
     G --> H{Use Terminal Prefix?}
 
-    H -->|Yes| I[Prefix + Prompt Prefill]
-    I --> J[Manual Token-by-Token Generation Loop]
+    H -->|Yes| I[Prefix Embeddings + Prompt Tokens]
+    I --> J[HF generate via inputs_embeds]
     J --> K[Return generation metadata]
 
-    H -->|No| L[Question/Prompt Only]
-    L --> M[model.generate]
+    H -->|No| L[Prompt Tokens Only]
+    L --> M[HF generate via input_ids]
     M --> K
 ```
 
-## 4. `--no-terminal-prefix` 的作用
+这里需要特别注意：当前版本不再使用旧的“手写逐 token generation loop”。无论有没有 terminal prefix，终端生成最终都委托给 Hugging Face `generate(...)`，差别只在于是走 `inputs_embeds` 还是 `input_ids` 路径。
 
-`--no-terminal-prefix` 只影响终端 agent，不影响前面非终端 agent 的 latent reasoning。
+## 4. `use_terminal_prefix` 的作用
+
+`use_terminal_prefix` 只影响终端 agent，不影响前面非终端 agent 的 latent reasoning。
 
 ```mermaid
 flowchart LR
@@ -103,33 +105,33 @@ flowchart LR
     B --> C{use_terminal_prefix}
     C -->|true| D[Terminal Agent Reads Prefix]
     C -->|false| E[Terminal Agent Ignores Prefix]
-    D --> F[Manual Generation Path]
-    E --> G[Direct generate Path]
+    D --> F[generate with inputs_embeds]
+    E --> G[generate with input_ids]
 ```
 
 这意味着：
 
-- 开启 `--no-terminal-prefix` 时，前面 agent 还是会照常跑
-- 只是最后一个 agent 在生成答案时不使用上游 prefix
-- 这通常会更快，因为会绕开当前的手写逐 token 生成路径
+- 前面 agent 仍然会完整执行
+- 区别只在最后一个 agent 是否真的消费聚合 prefix
+- `false` 往往更快，因为省掉了 prefix-embedding 拼接分支
 
 ## 5. Eval Logging Workflow
 
-当前 `ours eval` 在每条样本完成后，会把结果写入两个 JSON 文件。
+当前 `ours eval` 在每个 shard step 完成后，会聚合各 rank 的样本更新，并持续刷新 JSON 结果文件。
 
 ```mermaid
 flowchart TD
-    A[One Sample Finished] --> B[Get generated_text and generation metadata]
-    B --> C[Extract prediction]
-    C --> D[Build sample result]
-    D --> E[Append to in-memory results]
-    E --> F[Refresh eval_results.json]
-    E --> G[Refresh agent_logs.json]
+    A[One Batch Finished on Each Rank] --> B[Gather Sharded Updates]
+    B --> C[Main Rank Merges Sample Results]
+    C --> D[Refresh eval_results_train.json or eval_results.json]
+    C --> E[Refresh agent_logs_train.json or agent_logs.json]
 ```
 
-这里的两个输出文件分别是：
+常见输出文件是：
 
+- `eval_results_train.json`
 - `eval_results.json`
+- `agent_logs_train.json`
 - `agent_logs.json`
 
 你也可以配合这两份文档一起看：
@@ -139,18 +141,18 @@ flowchart TD
 
 ## 6. 为什么当前 Eval 会慢
 
-从 workflow 角度看，当前 `ours eval` 慢主要有这几层原因：
+从 workflow 角度看，当前 `ours eval` 慢主要有四层原因：
 
-1. 多个非终端 agent 是串行执行的，不是并行执行的。
-2. 每个非终端 agent 都要做 `m` 步 latent reasoning。
-3. 终端 agent 在使用 terminal prefix 时，会走手写逐 token 生成路径。
-4. 每条样本结束后都会刷新 JSON 结果文件。
+1. 多个非终端 agent 串行执行。
+2. 每个非终端 agent 都要跑 `reasoning_steps`。
+3. 终端 agent 在使用 terminal prefix 时需要走 `inputs_embeds` 生成分支。
+4. 主进程会持续刷新结果 JSON。
 
-因此当前的总体耗时并不只是“最后生成答案的时间”，而是：
+因此总体耗时近似是：
 
 ```text
 多 agent latent reasoning
 + prefix compression
 + terminal generation
-+ logging / JSON refresh
++ gather / JSON refresh
 ```
