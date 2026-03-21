@@ -172,7 +172,13 @@ def test_build_chat_prompt_text_uses_system_and_user_messages():
         {
             "messages": [
                 {"role": "system", "content": "You are a careful math solver."},
-                {"role": "user", "content": "Solve 2+2."},
+                {
+                    "role": "user",
+                    "content": (
+                        "Task:\nSolve 2+2.\n\n"
+                        "Return the final answer. End with a standalone numeric answer when applicable."
+                    ),
+                },
             ],
             "tokenize": False,
             "add_generation_prompt": True,
@@ -188,7 +194,7 @@ def test_extract_gsm8k_answer_normalizes_trailing_decimal_punctuation():
     assert extract_answer("#### 42.0", task_type="gsm8k") == "42"
 
 
-def test_chat_with_prefix_generation_inputs_disable_thinking_by_default():
+def test_chat_with_prefix_generation_inputs_enable_thinking_by_default():
     class DummyTokenizer:
         def __init__(self):
             self.enable_thinking_values = []
@@ -234,7 +240,7 @@ def test_chat_with_prefix_generation_inputs_disable_thinking_by_default():
         inference_mode="chat_with_prefix",
     )
 
-    assert agent.base_model.tokenizer.enable_thinking_values == [False]
+    assert agent.base_model.tokenizer.enable_thinking_values == [True]
 
 
 def test_forward_for_loss_can_use_chat_with_prefix_prompt_shape():

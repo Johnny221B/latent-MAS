@@ -29,6 +29,7 @@ from torch.optim import AdamW
 
 from src.utils.config import load_config
 from src.utils.output_paths import build_timestamped_output_dir
+from src.utils.progress_logging import ProgressLogger
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
 from src.utils.token_utils import append_eos_token
 from src.utils.training import (
@@ -61,6 +62,18 @@ def format_duration(seconds: float) -> str:
 
 def is_main_process() -> bool:
     return not dist.is_initialized() or dist.get_rank() == 0
+
+
+def build_live_eval_plan(evaluation_cfg: dict) -> list[tuple[str, int | None]]:
+    plan = []
+    for split_name, sample_limit in (
+        ("train", evaluation_cfg.get("train_probe_samples")),
+        ("test", evaluation_cfg.get("test_probe_samples")),
+    ):
+        if sample_limit is not None and sample_limit <= 0:
+            continue
+        plan.append((split_name, sample_limit))
+    return plan
 
 
 def setup_distributed():
@@ -203,7 +216,11 @@ def train(config_path: str, max_samples: int | None = None):
         import yaml
         with open(output_dir / "config.yaml", "w") as f:
             yaml.dump(config, f, default_flow_style=False)
-        print(f"  Output dir: {output_dir}")
+        progress_logger = ProgressLogger(output_dir / "train_progress.log")
+        train_log = progress_logger.log
+        train_log(f"  Output dir: {output_dir}")
+    else:
+        train_log = print
 
     wandb_run = init_wandb_run(config=config, output_dir=output_dir, rank=rank)
 
@@ -315,7 +332,7 @@ def train(config_path: str, max_samples: int | None = None):
                 avg_batch_seconds = elapsed_seconds / max(completed_batches, 1)
                 eta_seconds = avg_batch_seconds * max(total_batches - completed_batches, 0)
 
-                print(
+                train_log(
                     f"  E{epoch+1} B{batch_idx+1}/{len(dataloader)} | "
                     f"Loss:{output['loss'].item():.4f} "
                     f"Task:{output['task_loss'].item():.4f} "
@@ -350,7 +367,7 @@ def train(config_path: str, max_samples: int | None = None):
                     "adjacency_state": adjacency.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                 }, ckpt_path)
-                print(f"  Saved: {ckpt_path}")
+                train_log(f"  Saved: {ckpt_path}")
 
         # ── End of epoch ──
         if is_main_process():
@@ -359,16 +376,16 @@ def train(config_path: str, max_samples: int | None = None):
             remaining_epochs = training_cfg["epochs"] - (epoch + 1)
             avg_epoch_seconds = elapsed_seconds / max(epoch + 1, 1)
             eta_seconds = avg_epoch_seconds * remaining_epochs
-            print(f"\n{'='*60}")
-            print(
+            train_log(f"\n{'='*60}")
+            train_log(
                 f"Epoch {epoch+1} complete | Avg Loss: {avg_loss:.4f} | "
                 f"elapsed: {format_duration(elapsed_seconds)} | "
                 f"eta: {format_duration(eta_seconds)}"
             )
-            print(system.log_adjacency())
+            train_log(str(system.log_adjacency()))
             A = adjacency.get_adjacency().detach()
-            print(f"Adjacency range: [{A.min().item():.4f}, {A.max().item():.4f}]")
-            print(f"{'='*60}\n")
+            train_log(f"Adjacency range: [{A.min().item():.4f}, {A.max().item():.4f}]")
+            train_log(f"{'='*60}\n")
             log_wandb(
                 wandb_run,
                 {
@@ -395,6 +412,9 @@ def train(config_path: str, max_samples: int | None = None):
             "max_new_tokens": evaluation_cfg.get("max_new_tokens", 64),
             "inference_mode": evaluation_cfg.get("inference_mode", "chat_with_prefix"),
             "use_terminal_prefix": evaluation_cfg.get("use_terminal_prefix", True),
+            "communication_mode": evaluation_cfg.get("communication_mode", "latent_prefix"),
+            "text_message_edge_threshold": evaluation_cfg.get("text_message_edge_threshold", 0.5),
+            "text_message_max_new_tokens": evaluation_cfg.get("text_message_max_new_tokens", 512),
             "run_baseline": False,
             "do_sample": evaluation_cfg.get("do_sample", False),
             "write_agent_logs": evaluation_cfg.get("write_agent_logs", False),
@@ -405,12 +425,9 @@ def train(config_path: str, max_samples: int | None = None):
             "world_size": world_size,
             "is_dist": is_ddp,
         }
-        for split_name, sample_limit in (
-            ("train", evaluation_cfg.get("train_probe_samples")),
-            ("test", evaluation_cfg.get("test_probe_samples")),
-        ):
+        for split_name, sample_limit in build_live_eval_plan(evaluation_cfg):
             if is_main_process():
-                print(f"\nStarting post-train evaluation on {split_name} split...")
+                train_log(f"\nStarting post-train evaluation on {split_name} split...")
             eval_summary = evaluate_loaded_system(
                 system=system,
                 config=config,
@@ -432,9 +449,9 @@ def train(config_path: str, max_samples: int | None = None):
                 "adjacency_state": adjacency.state_dict(),
                 "config": config,
             }, final_path)
-            print(f"Training complete. Final model saved to {final_path}")
+            train_log(f"Training complete. Final model saved to {final_path}")
         else:
-            print("Training complete. Final checkpoint save disabled by config.")
+            train_log("Training complete. Final checkpoint save disabled by config.")
         log_wandb(
             wandb_run,
             {

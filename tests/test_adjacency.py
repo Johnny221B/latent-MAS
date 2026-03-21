@@ -133,6 +133,41 @@ def test_graph_loss_respects_custom_allowed_edges_mask():
     assert torch.isclose(out["loss_sparse"], torch.tensor(2.1))
 
 
+def test_adjacency_init_scale_is_configurable():
+    prior = torch.tensor([
+        [0, 1, 0],
+        [0, 0, 1],
+        [0, 0, 0],
+    ], dtype=torch.float32)
+
+    strong = LearnableAdjacency(prior=prior, init_scale=5.0)
+    weak = LearnableAdjacency(prior=prior, init_scale=1.5)
+
+    strong_A = strong.get_adjacency()
+    weak_A = weak.get_adjacency()
+
+    assert strong_A[0, 1] > weak_A[0, 1]
+    assert strong_A[0, 2] < weak_A[0, 2]
+
+
+def test_prior_residual_parameterization_starts_from_prior_logits():
+    prior = torch.tensor([
+        [0, 1, 0],
+        [0, 0, 1],
+        [0, 0, 0],
+    ], dtype=torch.float32)
+
+    adj = LearnableAdjacency(
+        prior=prior,
+        init_scale=1.5,
+        parameterization="prior_residual",
+    )
+    A = adj.get_adjacency()
+
+    assert A[0, 1] > 0.7
+    assert A[0, 2] < 0.3
+
+
 def test_validate_graph_topology_rejects_prior_edges_that_violate_execution_order():
     prior = torch.tensor([
         [0, 1, 0],

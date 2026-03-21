@@ -7,6 +7,8 @@ model:
 graph:
   config: "configs/graphs/default_5agent.json"
   roles_dir: "configs/roles"
+  parameterization: "prior_residual"
+  init_scale: 1.5
 
 compressor:
   num_queries: 16
@@ -39,15 +41,18 @@ evaluation:
   run_after_train: true
   max_new_tokens: 12000
   batch_size: 32
-  train_probe_samples: 64
+  train_probe_samples: 0
   test_probe_samples: 64
   inference_mode: "chat_with_prefix"
-  use_terminal_prefix: true
+  use_terminal_prefix: false
+  communication_mode: "text_messages"
+  text_message_edge_threshold: 0.5
+  text_message_max_new_tokens: 512
   do_sample: false
-  write_agent_logs: false
+  write_agent_logs: true
 
 output:
-  dir: "outputs/gsm8k_qwen3-8b_probe64_comm_only"
+  dir: "outputs/gsm8k_qwen3-8b_probe64_text_dag_eval"
   log_dir: "logs"
 
 report:

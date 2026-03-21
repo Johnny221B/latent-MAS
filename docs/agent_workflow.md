@@ -6,6 +6,7 @@
 - 非终端 agent 的 latent reasoning 与 prefix 压缩
 - 终端 agent 在 training / eval 下的不同路径
 - `use_terminal_prefix` 对最终推理路径的影响
+- `communication_mode=text_messages` 时沿 DAG 传播文本消息的对照路径
 
 ## 1. Overall Workflow
 
@@ -39,16 +40,20 @@ flowchart TD
     V --> W[Add Graph Loss]
     W --> X[Backprop to Trainable Params]
 
-    T -->|Evaluation| Y[generate_answer]
+    T -->|Eval latent_prefix| Y[generate_answer]
     Y --> Z[Decode Generated Text]
     Z --> AA[Extract Final Prediction]
     AA --> AB[Write eval_results*.json]
     AA --> AC[Optionally Write agent_logs*.json]
+
+    T -->|Eval text_messages| AD[Generate Text Message Along DAG]
+    AD --> AE[Terminal Agent Reads Upstream Text Messages]
+    AE --> Z
 ```
 
 ## 2. Non-Terminal Agent Workflow
 
-非终端 agent 的流程是固定的：先读上游 prefix，再做 latent reasoning，最后把 hidden trajectory 压缩成 prefix 传给下游。
+默认 latent 路径下，非终端 agent 的流程是固定的：先读上游 prefix，再做 latent reasoning，最后把 hidden trajectory 压缩成 prefix 传给下游。
 
 ```mermaid
 flowchart LR
@@ -70,7 +75,7 @@ flowchart LR
 
 ## 3. Terminal Agent Workflow
 
-终端 agent 是最关键的分叉点，因为 training 和 eval 的处理方式不同。
+终端 agent 是最关键的分叉点，因为 training 和 eval 的处理方式不同，而且 eval 现在还有 `latent_prefix` / `text_messages` 两条路。
 
 ```mermaid
 flowchart TD
@@ -81,7 +86,7 @@ flowchart TD
     D --> E[Return Logits]
     E --> F[Compute CE Task Loss]
 
-    B -->|Eval| G[Build Generation Input]
+    B -->|Eval latent_prefix| G[Build Generation Input]
     G --> H{Use Terminal Prefix?}
 
     H -->|Yes| I[Prefix Embeddings + Prompt Tokens]
@@ -91,9 +96,15 @@ flowchart TD
     H -->|No| L[Prompt Tokens Only]
     L --> M[HF generate via input_ids]
     M --> K
+
+    B -->|Eval text_messages| N[Build Chat Prompt with Upstream Text Messages]
+    N --> O[HF generate via input_ids]
+    O --> K
 ```
 
 这里需要特别注意：当前版本不再使用旧的“手写逐 token generation loop”。无论有没有 terminal prefix，终端生成最终都委托给 Hugging Face `generate(...)`，差别只在于是走 `inputs_embeds` 还是 `input_ids` 路径。
+
+`text_messages` 对照模式同样走 Hugging Face `generate(...)`，只是 upstream 信息不再以 latent prefix 注入，而是按 chat template 写进 user content。
 
 ## 4. `use_terminal_prefix` 的作用
 
@@ -133,6 +144,8 @@ flowchart TD
 - `eval_results.json`
 - `agent_logs_train.json`
 - `agent_logs.json`
+
+其中在 `communication_mode=text_messages` 的 eval 里，`agent_logs*.json` 会额外出现 `output_type = text_message` 的非终端 agent 记录。
 
 你也可以配合这两份文档一起看：
 

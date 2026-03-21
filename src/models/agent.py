@@ -26,6 +26,7 @@ class Agent:
         role_config: dict,
         base_model: BaseModelWrapper,
         max_seq_len: int = 512,
+        enable_thinking: bool = True,
     ):
         """
         Args:
@@ -44,6 +45,7 @@ class Agent:
         self.reasoning_steps = role_config.get("reasoning_steps", 256)
         self.base_model = base_model
         self.max_seq_len = max_seq_len
+        self.enable_thinking = enable_thinking
         self.compress_last_k = role_config.get("compress_last_k", 40)
 
         # Pre-tokenize the role prompt (system prompt)
@@ -86,11 +88,22 @@ class Agent:
         question_text: str,
         system_prompt: str | None = None,
         enable_thinking: bool = True,
+        upstream_text_messages: list[dict] | None = None,
+        generation_purpose: str = "answer",
     ) -> str:
         messages = []
         if system_prompt and system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt.strip()})
-        messages.append({"role": "user", "content": question_text})
+        messages.append(
+            {
+                "role": "user",
+                "content": Agent.build_chat_user_content(
+                    question_text=question_text,
+                    upstream_text_messages=upstream_text_messages,
+                    generation_purpose=generation_purpose,
+                ),
+            }
+        )
         return tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -98,13 +111,60 @@ class Agent:
             enable_thinking=enable_thinking,
         )
 
+    @staticmethod
+    def format_upstream_text_messages(upstream_text_messages: list[dict] | None = None) -> str:
+        if not upstream_text_messages:
+            return ""
+
+        lines = ["Upstream agent messages:"]
+        for message in upstream_text_messages:
+            role_name = str(message.get("role_name", "agent")).strip() or "agent"
+            edge_weight = message.get("edge_weight")
+            header = f"[{role_name}"
+            if edge_weight is not None:
+                header += f" | edge_weight={float(edge_weight):.3f}"
+            header += "]"
+            content = str(message.get("content", "")).strip() or "<empty>"
+            lines.extend([header, content, ""])
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def build_chat_user_content(
+        question_text: str,
+        upstream_text_messages: list[dict] | None = None,
+        generation_purpose: str = "answer",
+    ) -> str:
+        question_text = question_text.strip()
+        sections = [f"Task:\n{question_text}"]
+        upstream_block = Agent.format_upstream_text_messages(upstream_text_messages)
+        if upstream_block:
+            sections.append(upstream_block)
+
+        if generation_purpose == "message":
+            sections.append(
+                "Write a concise message for downstream agents. "
+                "Preserve useful reasoning, avoid roleplay, and do not give the final answer unless it is unavoidable."
+            )
+        elif generation_purpose == "answer":
+            sections.append(
+                "Return the final answer. End with a standalone numeric answer when applicable."
+            )
+        else:
+            raise ValueError(f"Unsupported generation_purpose: {generation_purpose}")
+
+        return "\n\n".join(sections)
+
     def _build_generation_inputs(
         self,
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         inference_mode: str = "legacy_plain_with_prefix",
+        upstream_text_messages: list[list[dict]] | list[dict] | None = None,
+        generation_purpose: str = "answer",
     ) -> tuple[torch.LongTensor, torch.Tensor | None]:
         if inference_mode == "legacy_plain_with_prefix":
+            if upstream_text_messages:
+                raise ValueError("upstream_text_messages require inference_mode='chat_with_prefix'")
             input_ids = self.build_input_ids(task_token_ids)
             if task_attention_mask is not None:
                 role_mask = torch.ones(
@@ -125,14 +185,29 @@ class Agent:
             task_token_ids.detach().cpu(),
             skip_special_tokens=True,
         )
+        batch_size = len(question_texts)
+        if upstream_text_messages is None:
+            upstream_batches = [None] * batch_size
+        elif batch_size == 1 and isinstance(upstream_text_messages, list):
+            upstream_batches = [upstream_text_messages]
+        elif (
+            isinstance(upstream_text_messages, list)
+            and len(upstream_text_messages) == batch_size
+            and all(message_group is None or isinstance(message_group, list) for message_group in upstream_text_messages)
+        ):
+            upstream_batches = upstream_text_messages
+        else:
+            upstream_batches = [upstream_text_messages] * batch_size
         prompts = [
             self.build_chat_prompt_text(
                 tokenizer=self.base_model.tokenizer,
                 question_text=question_text,
                 system_prompt=self.system_prompt,
-                enable_thinking=False,
+                enable_thinking=self.enable_thinking,
+                upstream_text_messages=upstream_batches[idx],
+                generation_purpose=generation_purpose,
             )
-            for question_text in question_texts
+            for idx, question_text in enumerate(question_texts)
         ]
         tokenized = self.base_model.tokenizer(
             prompts,
@@ -385,6 +460,7 @@ class Agent:
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
+        upstream_text_messages: list[dict] | None = None,
         max_new_tokens: int = 256,
         temperature: float = 0.6,
         top_p: float = 0.95,
@@ -392,11 +468,14 @@ class Agent:
         return_metadata: bool = False,
         inference_mode: str = "legacy_plain_with_prefix",
         use_upstream_prefix: bool = True,
+        generation_purpose: str = "answer",
     ) -> str | dict:
         input_ids, attention_mask = self._build_generation_inputs(
             task_token_ids=task_token_ids,
             task_attention_mask=task_attention_mask,
             inference_mode=inference_mode,
+            upstream_text_messages=upstream_text_messages,
+            generation_purpose=generation_purpose,
         )
         pad_token_id = self.base_model.tokenizer.pad_token_id
         if pad_token_id is None:
@@ -490,6 +569,34 @@ class Agent:
                 use_upstream_prefix=use_upstream_prefix,
                 return_metadata=return_metadata,
             )
+
+    @torch.no_grad()
+    def generate_message(
+        self,
+        task_token_ids: torch.LongTensor,
+        task_attention_mask: torch.Tensor | None = None,
+        upstream_text_messages: list[dict] | None = None,
+        max_new_tokens: int = 512,
+        temperature: float = 0.6,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+        return_metadata: bool = False,
+        inference_mode: str = "chat_with_prefix",
+    ) -> str | dict:
+        return self.generate_answer(
+            task_token_ids=task_token_ids,
+            task_attention_mask=task_attention_mask,
+            upstream_prefix=None,
+            upstream_text_messages=upstream_text_messages,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+            return_metadata=return_metadata,
+            inference_mode=inference_mode,
+            use_upstream_prefix=False,
+            generation_purpose="message",
+        )
 
     def __repr__(self) -> str:
         return f"Agent(id={self.agent_id}, role={self.role_name})"

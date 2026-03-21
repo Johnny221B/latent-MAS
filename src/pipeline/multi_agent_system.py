@@ -59,6 +59,7 @@ class MultiAgentSystem(nn.Module):
         self.terminal_agent_index = graph_config["terminal_agent_index"]
         self.execution_order = graph_config.get("execution_order", list(range(self.n_agents)))
         self.training_input_mode = config.get("training", {}).get("input_mode", "legacy_plain_with_prefix")
+        self.enable_thinking = config.get("model", {}).get("enable_thinking", True)
         prior = torch.tensor(graph_config["adjacency_prior"], dtype=torch.float32)
         allowed_edges_mask = validate_graph_topology(
             prior=prior,
@@ -93,6 +94,7 @@ class MultiAgentSystem(nn.Module):
                 role_config=role_config,
                 base_model=self.base_model,
                 max_seq_len=config["training"].get("max_seq_len", 512),
+                enable_thinking=self.enable_thinking,
             )
             self.agents.append(agent)
 
@@ -116,6 +118,8 @@ class MultiAgentSystem(nn.Module):
         self.adjacency = LearnableAdjacency(
             prior=prior,
             allowed_edges_mask=allowed_edges_mask,
+            init_scale=config["graph"].get("init_scale", 5.0),
+            parameterization=config["graph"].get("parameterization", "sigmoid_logits"),
         )
 
         # ── Executor (stateless) ──
@@ -141,6 +145,9 @@ class MultiAgentSystem(nn.Module):
         use_terminal_prefix: bool = True,
         do_sample: bool = True,
         collect_agent_logs: bool = False,
+        communication_mode: str = "latent_prefix",
+        text_message_edge_threshold: float = 0.5,
+        text_message_max_new_tokens: int = 512,
     ) -> dict:
         """Full forward pass.
 
@@ -173,6 +180,9 @@ class MultiAgentSystem(nn.Module):
             execution_order=self.execution_order,
             terminal_agent_index=self.terminal_agent_index,
             training_input_mode=self.training_input_mode,
+            communication_mode=communication_mode,
+            text_message_edge_threshold=text_message_edge_threshold,
+            text_message_max_new_tokens=text_message_max_new_tokens,
         )
 
         result = {"adjacency": A}

@@ -75,6 +75,7 @@ class LearnableAdjacency(nn.Module):
         prior: torch.Tensor,
         allowed_edges_mask: torch.Tensor | None = None,
         init_scale: float = 5.0,
+        parameterization: str = "sigmoid_logits",
     ):
         """
         Args:
@@ -99,6 +100,8 @@ class LearnableAdjacency(nn.Module):
         elif allowed_edges_mask.shape != prior.shape:
             raise ValueError("allowed_edges_mask must have the same shape as prior")
         self.register_buffer("allowed_edges_mask", allowed_edges_mask.to(dtype=torch.bool))
+        self.parameterization = parameterization
+        self.init_scale = init_scale
 
         # Initialize logits: prior=1 -> +scale, prior=0 -> -scale
         init_logits = torch.where(
@@ -107,10 +110,18 @@ class LearnableAdjacency(nn.Module):
             torch.full_like(prior, -init_scale, dtype=torch.float32),
         )
 
-        # Mask out any illegal edges, including diagonal/self-loops.
-        init_logits[~self.allowed_edges_mask] = float("-inf")
-
-        self.logits = nn.Parameter(init_logits)
+        if parameterization == "sigmoid_logits":
+            # Mask out any illegal edges, including diagonal/self-loops.
+            init_logits[~self.allowed_edges_mask] = float("-inf")
+            self.logits = nn.Parameter(init_logits)
+            self.register_buffer("base_logits", torch.empty(0))
+        elif parameterization == "prior_residual":
+            self.register_buffer("base_logits", init_logits)
+            self.logits = nn.Parameter(torch.zeros_like(prior, dtype=torch.float32))
+        else:
+            raise ValueError(
+                "parameterization must be one of {'sigmoid_logits', 'prior_residual'}"
+            )
 
     def get_adjacency(self) -> torch.Tensor:
         """Return the soft adjacency matrix A = σ(W).
@@ -120,7 +131,12 @@ class LearnableAdjacency(nn.Module):
                 A[i][j] = connection strength from agent i to agent j.
                 Illegal edges in allowed_edges_mask are always 0.
         """
-        return torch.sigmoid(self.logits)
+        if self.parameterization == "sigmoid_logits":
+            raw_logits = self.logits
+        else:
+            raw_logits = self.base_logits + self.logits
+            raw_logits = raw_logits.masked_fill(~self.allowed_edges_mask, float("-inf"))
+        return torch.sigmoid(raw_logits)
 
     def get_hard_adjacency(self, threshold: float = 0.5) -> torch.Tensor:
         """Return a binarized adjacency matrix (for inference/visualization).

@@ -5,6 +5,11 @@
 - `eval_results*.json`
 - `agent_logs*.json`
 
+另外，当前版本还会把关键终端进度同步写到本地文本日志：
+
+- `eval_progress.log`
+- `train_progress.log`（如果是从训练脚本触发的 live eval）
+
 它既适用于独立 checkpoint eval，也适用于训练结束后直接复用内存中模型做的 live eval。
 
 ## 1. 输出文件名
@@ -15,6 +20,8 @@
 - `eval_results_train.json`：`train` split
 - `agent_logs.json`：`test` split 且 `write_agent_logs=true`
 - `agent_logs_train.json`：`train` split 且 `write_agent_logs=true`
+- `eval_progress.log`：评测过程中的关键终端进度副本
+- `train_progress.log`：训练过程中的关键终端进度副本
 
 这些文件通常保存在同一个 output 目录下，例如：
 
@@ -81,10 +88,14 @@ outputs/gsm8k_qwen3-8b_probe64_comm_only_YYYYMMDD_HHMMSS/
   "generation_max_new_tokens": 128,
   "inference_mode": "chat_with_prefix",
   "use_terminal_prefix": true,
+  "communication_mode": "latent_prefix",
+  "text_message_edge_threshold": 0.5,
+  "text_message_max_new_tokens": 512,
   "do_sample": false,
   "write_agent_logs": false,
   "worker": null,
   "batch_size": 32,
+  "preview_limit": 0,
   "config": { ... }
 }
 ```
@@ -93,6 +104,7 @@ outputs/gsm8k_qwen3-8b_probe64_comm_only_YYYYMMDD_HHMMSS/
 
 - `checkpoint_path` 在 live eval 下可以是 `null`
 - `split` 明确区分 train/test 指标
+- `preview_limit=0` 表示跳过 preflight sample preview，直接进入 batch eval
 - `config` 会嵌入完整 experiment config，方便复现
 
 ### `samples[*]`
@@ -130,6 +142,7 @@ outputs/gsm8k_qwen3-8b_probe64_comm_only_YYYYMMDD_HHMMSS/
 
 - `finish_reason` 常见值是 `eos` 或 `max_new_tokens`
 - `used_upstream_prefix` 记录终端 agent 是否真的消费了 terminal prefix
+- 如果 `communication_mode=text_messages`，这里通常会是 `false`，因为终端 agent 不再读取 latent prefix
 
 ## 3. `agent_logs*.json`
 
@@ -176,6 +189,16 @@ outputs/gsm8k_qwen3-8b_probe64_comm_only_YYYYMMDD_HHMMSS/
 - `hidden_trajectory`
 - `compressed_prefix`
 
+在 `communication_mode=text_messages` 的 eval 对照模式下，非终端 agent 会改成记录：
+
+- `agent_id`
+- `role_name`
+- `output_type = text_message`
+- `system_prompt`
+- `upstream_text_messages`
+- `generated_text`
+- `generation`
+
 终端 agent 通常会记录：
 
 - `agent_id`
@@ -189,10 +212,13 @@ outputs/gsm8k_qwen3-8b_probe64_comm_only_YYYYMMDD_HHMMSS/
 - `generation`
 
 其中张量类字段不会保存完整数值，而是保存 shape / norm / mean / std 这类摘要统计。
+而 `upstream_text_messages` 会保留结构化文本条目，典型字段是 `agent_id`、`role_name`、`content`、`edge_weight`。
 
 ## 4. 读取这些文件时要注意什么
 
 - `eval_results_train.json` 和 `eval_results.json` 不能混为一个指标；它们代表不同 split。
+- 如果 `train_probe_samples=0`，训练后可以只生成 `eval_results.json` / `agent_logs.json`，而没有 train split 对应文件。
 - `checkpoint_path=null` 不表示结果无效，只表示它来自 live eval。
 - `agent_logs*.json` 是可选产物，不是每次评测都会生成。
+- `eval_progress.log` / `train_progress.log` 不是结构化 JSON；它们是给人追踪后台进度用的文本副本。
 - 小样本 probe 时应明确区分 same-split 指标和 held-out 指标。

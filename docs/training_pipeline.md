@@ -83,6 +83,10 @@
 - `test_probe_samples`
 - `inference_mode`
 - `use_terminal_prefix`
+- `communication_mode`
+- `text_message_edge_threshold`
+- `text_message_max_new_tokens`
+- `preview_limit`
 - `do_sample`
 - `write_agent_logs`
 
@@ -91,7 +95,12 @@
 - 训练后要不要马上评测
 - 评测跑 `train` / `test` 各多少样本
 - 终端 agent 是否使用上游 prefix
+- 评测时是沿 latent prefix 通信，还是沿 DAG 传播 text messages
 - 是否额外生成 `agent_logs*.json`
+- 评测前要不要先打印少量 sample preview；当 `preview_limit=0` 时会直接进入 batch eval
+
+其中当前 graph-search probe 默认只评 `test` split，并把 `train_probe_samples=0` 当作“跳过 train live eval”。
+其中 `communication_mode=text_messages` 当前只用于 inference/eval，对照测试会保留 learned DAG，但取消 latent communication，改成按 chat template 传播 agent 文本消息。
 
 ## 3. 数据与批次
 
@@ -180,7 +189,18 @@ $$
 
 不再做按边权和归一化。
 
-### 5.2 终端 agent 训练分支
+### 5.2 Eval 下的 `text_messages` 对照模式
+
+当 `evaluation.communication_mode=text_messages` 时，执行器会切到一条单独的 eval 路径：
+
+1. 用当前 learned adjacency 的硬图决定哪些上游 agent 文本消息会被下游看到。
+2. 每个非终端 agent 不再做 latent reasoning / compressor 压缩，而是通过 chat template 生成一段给下游 agent 的文本 message。
+3. 下游 agent 把这些结构化上游 messages 放进 user content，再继续生成自己的 message。
+4. terminal agent 也只消费这些 text messages，不再消费 latent prefix。
+
+这条路径的目标是做对照，不是替代训练主路径。
+
+### 5.3 终端 agent 训练分支
 
 终端 agent 在训练时走 `forward_for_loss(...)`。
 
@@ -251,6 +271,9 @@ $$
 - 不想落超大 `.pt` 文件的全参实验
 - 只保留轻量结果文件的快速迭代
 
+如果 `train_probe_samples=0`，live eval 只会生成 `test` split 对应结果文件。  
+如果 `communication_mode=text_messages`，live eval 会走文本通信对照路径，但训练本身仍然保持原来的 latent communication 路径。
+
 ## 9. 输出目录与产物
 
 输出目录由 [src/utils/output_paths.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/utils/output_paths.py) 生成带时间戳的路径，例如：
@@ -262,6 +285,8 @@ outputs/gsm8k_qwen3-8b_probe64_comm_only_YYYYMMDD_HHMMSS/
 当前版本常见产物包括：
 
 - `config.yaml`
+- `train_progress.log`
+- `eval_progress.log`
 - `loss_log.csv`
 - `eval_results_train.json`
 - `eval_results.json`
@@ -270,6 +295,11 @@ outputs/gsm8k_qwen3-8b_probe64_comm_only_YYYYMMDD_HHMMSS/
 - `final_model.pt`（仅 `save_final_checkpoint=true` 时）
 
 因此 `final_model.pt` 不是当前版本的必有产物。
+
+其中：
+
+- `train_progress.log` 会镜像训练主循环里打印到终端的关键进度
+- `eval_progress.log` 会镜像 live eval / 独立 eval 的关键进度与 sample preview
 
 ## 10. 当前常用配置族
 

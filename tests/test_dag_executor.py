@@ -291,6 +291,150 @@ def test_dag_executor_respects_explicit_execution_order_for_non_terminal_agents(
     assert torch.allclose(agents[1].received_prefix, torch.full((1, 1, 4), 3.0))
 
 
+def test_dag_executor_text_messages_follow_dag_routes():
+    class FakeAgent:
+        def __init__(self, agent_id, role_name):
+            self.agent_id = agent_id
+            self.role_name = role_name
+            self.system_prompt = role_name
+            self.upstream_text_messages = None
+
+        def generate_message(self, **kwargs):
+            self.upstream_text_messages = kwargs["upstream_text_messages"]
+            return {
+                "generated_text": f"msg-{self.role_name}",
+                "finish_reason": "eos",
+                "generated_token_count": 3,
+                "stopped_early": True,
+            }
+
+        def generate_answer(self, **kwargs):
+            self.upstream_text_messages = kwargs["upstream_text_messages"]
+            self.use_upstream_prefix = kwargs["use_upstream_prefix"]
+            return {
+                "generated_text": "final-answer",
+                "finish_reason": "eos",
+                "generated_token_count": 4,
+                "stopped_early": True,
+            }
+
+    class FakeCompressor:
+        def __call__(self, hidden, mask=None):
+            raise AssertionError("compressor should not be used in text_messages mode")
+
+    agents = [
+        FakeAgent(0, "reader"),
+        FakeAgent(1, "planner"),
+        FakeAgent(2, "solver"),
+    ]
+    adjacency = torch.tensor([
+        [0.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0],
+    ])
+
+    executor = DAGExecutor(aggregator=MessageAggregator())
+    out = executor.execute(
+        agents=agents,
+        adjacency=adjacency,
+        compressor=FakeCompressor(),
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        training=False,
+        inference_mode="chat_with_prefix",
+        communication_mode="text_messages",
+        collect_agent_logs=True,
+    )
+
+    assert out["generated_text"] == "final-answer"
+    assert agents[0].upstream_text_messages == []
+    assert agents[1].upstream_text_messages == [
+        {"agent_id": 0, "role_name": "reader", "content": "msg-reader", "edge_weight": 1.0}
+    ]
+    assert agents[2].upstream_text_messages == [
+        {"agent_id": 0, "role_name": "reader", "content": "msg-reader", "edge_weight": 1.0},
+        {"agent_id": 1, "role_name": "planner", "content": "msg-planner", "edge_weight": 1.0},
+    ]
+    assert agents[2].use_upstream_prefix is False
+    assert out["agent_logs"][0]["output_type"] == "text_message"
+    assert out["agent_logs"][1]["output_type"] == "text_message"
+
+
+def test_dag_executor_text_messages_preserve_per_sample_batches():
+    class FakeAgent:
+        def __init__(self, agent_id, role_name):
+            self.agent_id = agent_id
+            self.role_name = role_name
+            self.system_prompt = role_name
+            self.seen_messages = None
+
+        def generate_message(self, **kwargs):
+            self.seen_messages = kwargs["upstream_text_messages"]
+            if self.agent_id == 0:
+                return {
+                    "generated_text": ["reader-0", "reader-1"],
+                    "finish_reason": ["eos", "eos"],
+                    "generated_token_count": [2, 2],
+                    "stopped_early": [True, True],
+                }
+            return {
+                "generated_text": ["planner-0", "planner-1"],
+                "finish_reason": ["eos", "eos"],
+                "generated_token_count": [2, 2],
+                "stopped_early": [True, True],
+            }
+
+        def generate_answer(self, **kwargs):
+            self.seen_messages = kwargs["upstream_text_messages"]
+            return {
+                "generated_text": ["ans-0", "ans-1"],
+                "finish_reason": ["eos", "eos"],
+                "generated_token_count": [2, 2],
+                "stopped_early": [True, True],
+            }
+
+    class FakeCompressor:
+        def __call__(self, hidden, mask=None):
+            raise AssertionError("compressor should not be used in text_messages mode")
+
+    agents = [
+        FakeAgent(0, "reader"),
+        FakeAgent(1, "planner"),
+        FakeAgent(2, "solver"),
+    ]
+    adjacency = torch.tensor([
+        [0.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0],
+    ])
+
+    executor = DAGExecutor(aggregator=MessageAggregator())
+    out = executor.execute(
+        agents=agents,
+        adjacency=adjacency,
+        compressor=FakeCompressor(),
+        task_token_ids=torch.ones(2, 2, dtype=torch.long),
+        training=False,
+        inference_mode="chat_with_prefix",
+        communication_mode="text_messages",
+    )
+
+    assert out["generated_text"] == ["ans-0", "ans-1"]
+    assert agents[1].seen_messages == [
+        [{"agent_id": 0, "role_name": "reader", "content": "reader-0", "edge_weight": 1.0}],
+        [{"agent_id": 0, "role_name": "reader", "content": "reader-1", "edge_weight": 1.0}],
+    ]
+    assert agents[2].seen_messages == [
+        [
+            {"agent_id": 0, "role_name": "reader", "content": "reader-0", "edge_weight": 1.0},
+            {"agent_id": 1, "role_name": "planner", "content": "planner-0", "edge_weight": 1.0},
+        ],
+        [
+            {"agent_id": 0, "role_name": "reader", "content": "reader-1", "edge_weight": 1.0},
+            {"agent_id": 1, "role_name": "planner", "content": "planner-1", "edge_weight": 1.0},
+        ],
+    ]
+
+
 if __name__ == "__main__":
     test_aggregator_no_upstream()
     test_aggregator_weighted_sum()
