@@ -68,12 +68,12 @@
 - 含义：method 需要和代码保持一致，不应宣称“联合训练所有 agent 的 latent reasoning”
 - 当前状态：文档已收紧，算法层是否扩展仍取决于当前版本能否达标
 
-### 8. DDP 仍启用了 `find_unused_parameters=True`
+### 8. DDP 的 `find_unused_parameters` 额外开销已清理
 
 - 文件：`src/cli/train.py`
-- 现象：双卡训练时 PyTorch 发出额外遍历 autograd 图的 warning
+- 历史现象：双卡训练时 PyTorch 发出额外遍历 autograd 图的 warning
 - 风险：功能上不错误，但有额外性能开销
-- 当前状态：未改，待在稳定性确认后再清理
+- 当前状态：训练入口已统一切到 `find_unused_parameters=False`；如果后续引入条件分支导致部分参数在某些 step 不参与 backward，需要重新评估
 
 ### 9. 小样本高指标是否能仅靠通信层达到
 

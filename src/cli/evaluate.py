@@ -10,8 +10,10 @@ Usage:
 
 import argparse
 import copy
+import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -32,6 +34,7 @@ from src.models.agent import Agent
 
 
 def build_agent_sample_log(
+    question_id: str,
     question: str,
     gold: str,
     prediction: str,
@@ -40,6 +43,7 @@ def build_agent_sample_log(
     agent_logs: list[dict],
 ) -> dict:
     return {
+        "question_id": question_id,
         "question": question,
         "gold": gold,
         "prediction": prediction,
@@ -116,8 +120,49 @@ def write_agent_log_snapshot(
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
+def write_role_agent_log_snapshots(agent_log_dir: Path, samples: list[dict]) -> None:
+    role_payloads: dict[str, dict] = {}
+    agent_log_dir.mkdir(parents=True, exist_ok=True)
+
+    for sample in samples:
+        question_id = str(sample["question_id"])
+        for agent in sample.get("agents", []):
+            role_name = agent["role_name"]
+            payload = role_payloads.setdefault(
+                role_name,
+                {
+                    "role_name": role_name,
+                    "samples": {},
+                },
+            )
+            payload["samples"][question_id] = {
+                "question_id": question_id,
+                "question": sample["question"],
+                "input": {
+                    "system_prompt": agent.get("system_prompt"),
+                    "received_upstream_prefix": agent.get("received_upstream_prefix"),
+                    "upstream_prefix": agent.get("upstream_prefix"),
+                    "received_upstream_texts": agent.get("received_upstream_texts"),
+                    "upstream_texts": agent.get("upstream_texts"),
+                },
+                "output": {
+                    "output_type": agent.get("output_type"),
+                    "generated_text": agent.get("generated_text"),
+                    "generation": agent.get("generation"),
+                    "hidden_trajectory": agent.get("hidden_trajectory"),
+                    "compressed_prefix": agent.get("compressed_prefix"),
+                },
+            }
+
+    for role_name, payload in role_payloads.items():
+        role_path = agent_log_dir / f"{role_name}.json"
+        with open(role_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
 def collate_fn(batch: list[dict]) -> dict:
     return {
+        "question_ids": [item["question_id"] for item in batch],
         "questions": [item["question"] for item in batch],
         "answers": [item["answer"] for item in batch],
     }
@@ -134,6 +179,18 @@ def build_generation_metadata(generated_token_ids: list[int], eos_token_id: int 
         "generated_token_count": len(generated_token_ids),
         "stopped_early": finish_reason != "max_new_tokens",
     }
+
+
+def build_single_question_dataset(question: str) -> list[dict]:
+    normalized_question = question.strip()
+    question_hash = hashlib.sha1(normalized_question.encode("utf-8")).hexdigest()[:12]
+    return [
+        {
+            "question_id": f"manual-{question_hash}",
+            "question": normalized_question,
+            "answer": "",
+        }
+    ]
 
 
 def setup_eval_distributed() -> tuple[torch.device, int, int, bool]:
@@ -247,10 +304,13 @@ def evaluate_loaded_system(
     agent_log_stem = "agent_logs" if split == "test" else f"agent_logs_{split}"
     eval_path = output_dir / f"{eval_stem}.json"
     agent_log_path = output_dir / f"{agent_log_stem}.json"
+    role_agent_log_dir = output_dir / "agent_log"
     if is_main_process(rank):
         for path in (eval_path, agent_log_path):
             if path.exists():
                 path.unlink()
+        if role_agent_log_dir.exists():
+            shutil.rmtree(role_agent_log_dir)
 
     if is_main_process(rank):
         print("\nRunning evaluation...")
@@ -291,6 +351,7 @@ def evaluate_loaded_system(
                 generation = output.get("generation", {})
                 agent_logs = output.get("agent_logs", [])
                 batch_questions = batch["questions"]
+                batch_question_ids = batch["question_ids"]
                 batch_answers = batch["answers"]
                 batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
                 batch_size_actual = len(batch_questions)
@@ -308,11 +369,13 @@ def evaluate_loaded_system(
                     local_update.append(
                         {
                             "question": batch_questions[sample_idx],
+                            "question_id": batch_question_ids[sample_idx],
                             "gold": gold,
                             "prediction": pred,
                             "generation": sample_generation,
                             "correct": is_correct,
                             "agent_log": build_agent_sample_log(
+                                question_id=batch_question_ids[sample_idx],
                                 question=batch_questions[sample_idx],
                                 gold=gold,
                                 prediction=pred,
@@ -340,6 +403,7 @@ def evaluate_loaded_system(
                     generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
                     sample_result = {
                         "question": shard_update["question"],
+                        "question_id": shard_update["question_id"],
                         "gold": shard_update["gold"],
                         "prediction": shard_update["prediction"],
                         "generation": shard_update["generation"],
@@ -392,6 +456,7 @@ def evaluate_loaded_system(
                     parameters=params,
                     samples=agent_log_results,
                 )
+                write_role_agent_log_snapshots(role_agent_log_dir, agent_log_results)
 
             if total > 0 and ((total % 10) == 0 or total == len(full_dataset)):
                 acc = correct / total * 100
@@ -444,6 +509,7 @@ def evaluate_loaded_system(
         "paths": {
             "eval_path": str(eval_path),
             "agent_log_path": str(agent_log_path) if write_agent_logs else None,
+            "role_agent_log_dir": str(role_agent_log_dir) if write_agent_logs else None,
         },
     }
     return result_payload
@@ -462,6 +528,8 @@ def evaluate(
     write_agent_logs: bool = True,
     worker: int | None = None,
     batch_size: int = 1,
+    question: str | None = None,
+    output_dir: str | Path | None = None,
 ):
     config = load_config(config_path)
     generation_max_new_tokens = max_new_tokens
@@ -509,9 +577,14 @@ def evaluate(
     task = config["training"]["task"]
     if max_samples is not None and max_samples < 0:
         max_samples = None
-    if is_main_process(rank):
-        print(f"\nLoading {task} test set...")
-    full_dataset = create_dataset(task=task, split=split, max_samples=max_samples)
+    if question is not None:
+        if is_main_process(rank):
+            print("\nLoading manual inference question...")
+        full_dataset = build_single_question_dataset(question)
+    else:
+        if is_main_process(rank):
+            print(f"\nLoading {task} test set...")
+        full_dataset = create_dataset(task=task, split=split, max_samples=max_samples)
     dataset = shard_dataset(full_dataset, rank, world_size)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
     if is_main_process(rank):
@@ -527,11 +600,12 @@ def evaluate(
     agent_log_results = []
     sample_durations = []
     generated_token_counts = []
-    checkpoint_dir = Path(checkpoint_path).parent
+    checkpoint_dir = Path(output_dir) if output_dir is not None else Path(checkpoint_path).parent
     eval_stem = "eval_results" if split == "test" else f"eval_results_{split}"
     agent_log_stem = "agent_logs" if split == "test" else f"agent_logs_{split}"
     eval_path = checkpoint_dir / f"{eval_stem}.json"
     agent_log_path = checkpoint_dir / f"{agent_log_stem}.json"
+    role_agent_log_dir = checkpoint_dir / "agent_log"
     if is_main_process(rank):
         cleanup_patterns = [
             "eval_results.partial.rank*.json",
@@ -545,6 +619,8 @@ def evaluate(
         for path in (eval_path, agent_log_path):
             if path.exists():
                 path.unlink()
+        if role_agent_log_dir.exists():
+            shutil.rmtree(role_agent_log_dir)
 
     if is_main_process(rank):
         print("\nRunning evaluation...")
@@ -585,6 +661,7 @@ def evaluate(
                 generation = output.get("generation", {})
                 agent_logs = output.get("agent_logs", [])
                 batch_questions = batch["questions"]
+                batch_question_ids = batch["question_ids"]
                 batch_answers = batch["answers"]
                 batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
                 batch_size_actual = len(batch_questions)
@@ -602,11 +679,13 @@ def evaluate(
                     local_update.append(
                         {
                             "question": batch_questions[sample_idx],
+                            "question_id": batch_question_ids[sample_idx],
                             "gold": gold,
                             "prediction": pred,
                             "generation": sample_generation,
                             "correct": is_correct,
                             "agent_log": build_agent_sample_log(
+                                question_id=batch_question_ids[sample_idx],
                                 question=batch_questions[sample_idx],
                                 gold=gold,
                                 prediction=pred,
@@ -634,6 +713,7 @@ def evaluate(
                     generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
                     sample_result = {
                         "question": shard_update["question"],
+                        "question_id": shard_update["question_id"],
                         "gold": shard_update["gold"],
                         "prediction": shard_update["prediction"],
                         "generation": shard_update["generation"],
@@ -663,6 +743,7 @@ def evaluate(
                     "checkpoint_path": checkpoint_path,
                     "split": split,
                     "max_samples": max_samples,
+                    "question": question,
                     "generation_max_new_tokens": generation_max_new_tokens,
                     "inference_mode": inference_mode,
                     "use_terminal_prefix": use_terminal_prefix,
@@ -695,6 +776,7 @@ def evaluate(
                     },
                     samples=agent_log_results,
                 )
+                write_role_agent_log_snapshots(role_agent_log_dir, agent_log_results)
 
             if total > 0 and ((total % 10) == 0 or total == len(full_dataset)):
                 acc = correct / total * 100
@@ -757,6 +839,7 @@ def evaluate(
             "checkpoint_path": checkpoint_path,
             "split": split,
             "max_samples": max_samples,
+            "question": question,
             "generation_max_new_tokens": generation_max_new_tokens,
             "inference_mode": inference_mode,
             "use_terminal_prefix": use_terminal_prefix,
@@ -772,6 +855,7 @@ def evaluate(
     print(f"  Results saved: {eval_path}")
     if write_agent_logs:
         print(f"  Agent logs saved: {agent_log_path}")
+        print(f"  Role agent logs saved: {role_agent_log_dir}")
 
     if not run_baseline:
         if is_dist:
@@ -822,6 +906,7 @@ def evaluate(
             pred = extract_answer(baseline_text, task_type=task)
             gold = batch["answers"][0].strip()
             baseline_update = {
+                "question_id": batch["question_ids"][0],
                 "question": batch["questions"][0],
                 "gold": gold,
                 "prediction": pred,
@@ -860,6 +945,7 @@ def evaluate(
                 "checkpoint_path": checkpoint_path,
                 "split": split,
                 "max_samples": max_samples,
+                "question": question,
                 "generation_max_new_tokens": generation_max_new_tokens,
                 "inference_mode": inference_mode,
                 "use_terminal_prefix": use_terminal_prefix,
@@ -923,6 +1009,7 @@ def evaluate(
             "checkpoint_path": checkpoint_path,
             "split": split,
             "max_samples": max_samples,
+            "question": question,
             "generation_max_new_tokens": generation_max_new_tokens,
             "inference_mode": inference_mode,
             "use_terminal_prefix": use_terminal_prefix,
@@ -965,11 +1052,13 @@ if __name__ == "__main__":
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--split", type=str, default="test", choices=["train", "test"])
     parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--question", type=str, default=None)
+    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument(
         "--inference-mode",
         type=str,
         default="chat_with_prefix",
-        choices=["chat_with_prefix", "legacy_plain_with_prefix"],
+        choices=["chat_with_prefix", "legacy_plain_with_prefix", "chat_with_text"],
     )
     parser.add_argument(
         "--no-terminal-prefix",
@@ -999,4 +1088,6 @@ if __name__ == "__main__":
         write_agent_logs=not args.no_agent_logs,
         worker=args.worker,
         batch_size=args.batch_size,
+        question=args.question,
+        output_dir=args.output_dir,
     )

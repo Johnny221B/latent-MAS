@@ -4,12 +4,15 @@
 
 - `eval_results.json`
 - `agent_logs.json`
+- `agent_log/<role>.json`
 
 这两个文件通常保存在同一个 checkpoint 目录下，例如：
 
 ```text
 outputs/gsm8k_qwen3-8b_xxx/
 ```
+
+如果使用 `evaluate.py --question "..." --output-dir <dir>` 或 [`scripts/inference.sh`](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/inference.sh)，这些文件会写到指定的 `output_dir`，而不是 checkpoint 目录本身。
 
 ---
 
@@ -97,6 +100,7 @@ outputs/gsm8k_qwen3-8b_xxx/
   "checkpoint_path": "outputs/.../final_model.pt",
   "split": "test",
   "max_samples": 100,
+  "question": null,
   "generation_max_new_tokens": 16384,
   "inference_mode": "chat_with_prefix",
   "use_terminal_prefix": true,
@@ -124,11 +128,14 @@ outputs/gsm8k_qwen3-8b_xxx/
 - `generation_max_new_tokens`
   当前推理时允许生成的最大 token 数。
 
+- `question`
+  若为 `null`，表示本次是常规数据集评测；若为字符串，表示本次是单题手工推理，该字段保存原始输入问题文本。
+
 - `inference_mode`
-  当前终端 agent 的推理模式，例如 `chat_with_prefix`。
+  当前终端 agent 的推理模式，例如 `chat_with_prefix`、`legacy_plain_with_prefix` 或 `chat_with_text`。
 
 - `use_terminal_prefix`
-  终端 agent 是否使用来自上游 agent 的 latent prefix。
+  终端 agent 是否使用来自上游 agent 的 latent prefix。若 `inference_mode = chat_with_text`，这个字段一般只反映调用参数，实际推理不会用到 latent prefix。
 
 - `do_sample`
   是否使用采样生成。
@@ -148,6 +155,7 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 ```json
 {
+  "question_id": "gsm8k-test-7",
   "question": "...",
   "gold": "18",
   "prediction": "9",
@@ -161,6 +169,9 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 - `question`
   原始问题文本。
+
+- `question_id`
+  当前样本在原始数据集中的稳定 id。若使用单题手工推理，则会自动生成 `manual-<sha1前缀>` 形式的稳定 id。当前仓库会把它贯穿到所有主要评测日志中，便于 role 级对齐分析。
 
 - `gold`
   标准答案。
@@ -243,6 +254,7 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 ```json
 {
+  "question_id": "gsm8k-test-7",
   "question": "...",
   "gold": "18",
   "prediction": "9",
@@ -319,6 +331,30 @@ outputs/gsm8k_qwen3-8b_xxx/
 - `compressed_prefix`
   当前 agent 压缩后发送给下游的 latent prefix 统计摘要。
 
+在 `chat_with_text` 模式下，非终端 agent 会改成文本日志，典型结构类似：
+
+```json
+{
+  "agent_id": 0,
+  "role_name": "reader",
+  "output_type": "text_message",
+  "system_prompt": "...",
+  "received_upstream_prefix": false,
+  "upstream_prefix": null,
+  "received_upstream_texts": true,
+  "upstream_texts": ["..."],
+  "generated_text": "...",
+  "generation": {
+    "generated_text": "...",
+    "finish_reason": "eos",
+    "generated_token_count": 64,
+    "stopped_early": true,
+    "inference_mode": "chat_with_text",
+    "used_upstream_prefix": false
+  }
+}
+```
+
 ### 3.2 终端 agent
 
 终端 agent 一般会记录类似下面的字段：
@@ -359,6 +395,12 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 - `used_upstream_prefix`
   终端 agent 在推理时是否真正使用了上游 prefix。
+
+- `received_upstream_texts`
+  当前终端 agent 是否接收到了来自上游 agent 的文本消息。
+
+- `upstream_texts`
+  当前终端 agent 接收到的文本消息列表。在 `chat_with_text` 模式下，这个字段比 `upstream_prefix` 更关键。
 
 - `generated_text`
   当前终端 agent 的直接生成文本。
@@ -408,4 +450,48 @@ outputs/gsm8k_qwen3-8b_xxx/
 - `worker` 在 `ours eval` 中表示评测进程数，不是线程数。
 - `generation.generated_text` 现在保存完整文本，不再依赖样本级顶层 `generated_text`。
 - `agent_logs.json` 比 `eval_results.json` 更适合做调试分析，因为它保留了每个 agent 的中间状态摘要。
+- `agent_log/<role>.json` 适合做按角色横向分析，因为它把同一角色在所有 `question_id` 上的输入/输出聚在一起。
+
+---
+
+## 5. `agent_log/<role>.json`
+
+这是当前评测额外生成的一组按角色拆分的日志文件。目录结构类似：
+
+```text
+outputs/.../agent_log/
+  reader.json
+  planner.json
+  solver.json
+```
+
+单个角色文件的结构如下：
+
+```json
+{
+  "role_name": "reader",
+  "samples": {
+    "gsm8k-test-7": {
+      "question_id": "gsm8k-test-7",
+      "question": "...",
+      "input": {
+        "system_prompt": "...",
+        "received_upstream_prefix": false,
+        "upstream_prefix": null,
+        "received_upstream_texts": false,
+        "upstream_texts": []
+      },
+      "output": {
+        "output_type": "text_message",
+        "generated_text": "...",
+        "generation": { ... },
+        "hidden_trajectory": null,
+        "compressed_prefix": null
+      }
+    }
+  }
+}
+```
+
+其中 `samples` 的 key 就是原始数据集里的 `question_id`。
 - 如果未来继续调整 JSON 结构，这份文档也应同步更新。

@@ -71,6 +71,12 @@ $$
 
 因此，从训练代码角度，一个 batch 的监督信号并不是“整段提示词 + 答案”的统一序列，而是问题和答案被分开编码，之后在终端 agent 中再拼接。
 
+当前默认实验配置 [gsm8k_5agent.yaml](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
+
+另外，当前评测路径额外支持 `evaluation.inference_mode = chat_with_text`。这个模式只用于推理期消融，不会改变训练；它的作用是把 agent 间通信从 latent prefix 改成文本消息，以便和原始 latent communication 做对照。
+
+当前 `evaluate.py` 还支持单题手工推理：可直接传入 `--question "..."` 和可选 `--output-dir`。这条路径不会读取评测数据集，而是构造一条临时样本，并复用与批量评测相同的 `eval_results.json`、`agent_logs.json`、`agent_log/<role>.json` 输出格式。
+
 ## 3. 模型组成
 
 顶层模块定义在 [multi_agent_system.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/pipeline/multi_agent_system.py)。从训练视角出发，整个系统可以拆成五个核心部分。
@@ -469,6 +475,7 @@ $$
 
 - `compressor` 被 DDP 包装
 - `adjacency.logits` 的梯度通过手动 `all_reduce` 同步
+- DDP 包装统一使用 `find_unused_parameters=False`，避免在当前稳定训练路径上额外遍历 autograd 图
 
 这说明当前分布式实现并不是把整个系统包进 DDP，而是只对真正训练的部分进行同步。
 

@@ -32,6 +32,7 @@ from src.utils.output_paths import build_timestamped_output_dir
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
 from src.utils.token_utils import append_eos_token
 from src.utils.training import (
+    build_ddp_kwargs,
     compute_grad_norm,
     should_save_checkpoint,
     validate_min_samples_for_batches,
@@ -126,17 +127,17 @@ def train(config_path: str, max_samples: int | None = None):
     if is_ddp:
         from torch.nn.parallel import DistributedDataParallel as DDP
 
+        ddp_kwargs = build_ddp_kwargs(device.index)
+
         if training_cfg.get("train_strategy") == "full_finetune":
             system.base_model.model = DDP(
                 system.base_model.model,
-                device_ids=[device.index],
-                find_unused_parameters=True,
+                **ddp_kwargs,
             )
         # Wrap compressor with DDP
         system.compressor = DDP(
             system.compressor,
-            device_ids=[device.index],
-            find_unused_parameters=True,
+            **ddp_kwargs,
         )
         # Adjacency is tiny, sync its gradients manually
         # (DDP overhead not worth it for 25 parameters)

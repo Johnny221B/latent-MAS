@@ -85,12 +85,20 @@ class Agent:
         tokenizer,
         question_text: str,
         system_prompt: str | None = None,
+        upstream_messages: list[str] | None = None,
         enable_thinking: bool = True,
     ) -> str:
         messages = []
         if system_prompt and system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt.strip()})
-        messages.append({"role": "user", "content": question_text})
+        user_content = question_text
+        if upstream_messages:
+            formatted_messages = "\n\n".join(
+                f"[Upstream message {idx + 1}]\n{message}"
+                for idx, message in enumerate(upstream_messages)
+            )
+            user_content = f"{formatted_messages}\n\n[Question]\n{question_text}"
+        messages.append({"role": "user", "content": user_content})
         return tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -103,6 +111,7 @@ class Agent:
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         inference_mode: str = "legacy_plain_with_prefix",
+        upstream_texts: list[list[str]] | None = None,
     ) -> tuple[torch.LongTensor, torch.Tensor | None]:
         if inference_mode == "legacy_plain_with_prefix":
             input_ids = self.build_input_ids(task_token_ids)
@@ -118,21 +127,24 @@ class Agent:
                 attention_mask = None
             return input_ids, attention_mask
 
-        if inference_mode != "chat_with_prefix":
+        if inference_mode not in {"chat_with_prefix", "chat_with_text"}:
             raise ValueError(f"Unsupported inference_mode: {inference_mode}")
 
         question_texts = self.base_model.tokenizer.batch_decode(
             task_token_ids.detach().cpu(),
             skip_special_tokens=True,
         )
+        if upstream_texts is None:
+            upstream_texts = [[] for _ in question_texts]
         prompts = [
             self.build_chat_prompt_text(
                 tokenizer=self.base_model.tokenizer,
                 question_text=question_text,
                 system_prompt=self.system_prompt,
+                upstream_messages=(messages if inference_mode == "chat_with_text" else None),
                 enable_thinking=False,
             )
-            for question_text in question_texts
+            for question_text, messages in zip(question_texts, upstream_texts)
         ]
         tokenized = self.base_model.tokenizer(
             prompts,
@@ -340,7 +352,7 @@ class Agent:
                     attention_mask = torch.cat([role_mask_part, task_attention_mask], dim=1)
             else:
                 attention_mask = None
-            prompt_len = role_len + task_token_ids.shape[1]
+            prompt_len = task_token_ids.shape[1]
             logits_start = role_len
         else:
             if input_mode != "chat_with_prefix":
@@ -385,6 +397,7 @@ class Agent:
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
+        upstream_texts: list[list[str]] | None = None,
         max_new_tokens: int = 256,
         temperature: float = 0.6,
         top_p: float = 0.95,
@@ -397,6 +410,7 @@ class Agent:
             task_token_ids=task_token_ids,
             task_attention_mask=task_attention_mask,
             inference_mode=inference_mode,
+            upstream_texts=upstream_texts,
         )
         pad_token_id = self.base_model.tokenizer.pad_token_id
         if pad_token_id is None:

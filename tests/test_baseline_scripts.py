@@ -287,3 +287,49 @@ def test_forward_for_loss_can_use_chat_with_prefix_prompt_shape():
 
     assert out["question_len"] == 3
     assert out["logits"].shape == (1, 5, 13)
+
+
+def test_forward_for_loss_legacy_prefix_length_matches_trimmed_logits():
+    class DummyTokenizer:
+        def __call__(self, prompts, return_tensors=None, add_special_tokens=False):
+            batch_size = 1 if isinstance(prompts, str) else len(prompts)
+            return {
+                "input_ids": torch.full((batch_size, 3), 7, dtype=torch.long),
+                "attention_mask": torch.ones(batch_size, 3, dtype=torch.long),
+            }
+
+    class DummyBaseModel:
+        def __init__(self):
+            self.tokenizer = DummyTokenizer()
+
+        @property
+        def device(self):
+            return torch.device("cpu")
+
+        def __call__(self, input_ids, attention_mask=None, prefix_embeds=None, output_hidden_states=True):
+            batch_size, seq_len = input_ids.shape
+            return {"logits": torch.zeros(batch_size, seq_len, 11)}
+
+    import torch
+
+    agent = Agent(
+        agent_id=0,
+        role_config={
+            "role_name": "summarizer",
+            "system_prompt": "You summarize.",
+            "reasoning_steps": 4,
+            "compress_last_k": 4,
+        },
+        base_model=DummyBaseModel(),
+    )
+
+    out = agent.forward_for_loss(
+        task_token_ids=torch.ones(1, 2, dtype=torch.long),
+        task_attention_mask=torch.ones(1, 2, dtype=torch.long),
+        answer_ids=torch.tensor([[5, 6]], dtype=torch.long),
+        answer_mask=torch.ones(1, 2, dtype=torch.long),
+        input_mode="legacy_plain_with_prefix",
+    )
+
+    assert out["question_len"] == 2
+    assert out["logits"].shape == (1, 4, 11)

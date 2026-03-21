@@ -61,7 +61,18 @@ class DAGExecutor:
             raise ValueError("terminal agent must be the last node in execution_order")
 
         all_prefixes = [None] * n
+        all_text_outputs = [None] * n
         agent_logs = []
+
+        def collect_upstream_texts(agent_index: int) -> list[str]:
+            texts = []
+            for upstream_idx in range(n):
+                message = all_text_outputs[upstream_idx]
+                if message is None:
+                    continue
+                if float(adjacency[upstream_idx, agent_index].detach().item()) > 0.5:
+                    texts.append(message)
+            return texts
 
         def summarize_tensor(name: str, value: torch.Tensor | None) -> dict | None:
             if value is None:
@@ -84,6 +95,38 @@ class DAGExecutor:
             )
 
             if j != terminal_index:
+                if not training and inference_mode == "chat_with_text":
+                    upstream_texts = collect_upstream_texts(j)
+                    text_output = agents[j].generate_answer(
+                        task_token_ids=task_token_ids,
+                        task_attention_mask=task_attention_mask,
+                        upstream_prefix=None,
+                        upstream_texts=[upstream_texts for _ in range(task_token_ids.shape[0])],
+                        max_new_tokens=max_new_tokens,
+                        return_metadata=True,
+                        inference_mode=inference_mode,
+                        use_upstream_prefix=False,
+                        do_sample=do_sample,
+                    )
+                    generated_text = text_output["generated_text"]
+                    all_text_outputs[j] = generated_text[0] if isinstance(generated_text, list) else generated_text
+                    if collect_agent_logs:
+                        agent_logs.append(
+                            {
+                                "agent_id": agents[j].agent_id,
+                                "role_name": agents[j].role_name,
+                                "output_type": "text_message",
+                                "system_prompt": agents[j].system_prompt,
+                                "received_upstream_prefix": False,
+                                "upstream_prefix": None,
+                                "received_upstream_texts": bool(upstream_texts),
+                                "upstream_texts": upstream_texts,
+                                "generated_text": generated_text,
+                                "generation": text_output,
+                            }
+                        )
+                    continue
+
                 # ── Non-terminal: latent reasoning → compress → pass downstream ──
                 agent_output = agents[j].reason(
                     task_token_ids=task_token_ids,
@@ -121,14 +164,24 @@ class DAGExecutor:
                     )
                 else:
                     # Inference: autoregressive generation, return text
+                    upstream_texts = None
+                    used_upstream_prefix = use_terminal_prefix
+                    terminal_upstream_prefix = upstream_prefix
+                    if inference_mode == "chat_with_text":
+                        upstream_texts = collect_upstream_texts(j)
+                        terminal_upstream_prefix = None
+                        used_upstream_prefix = False
                     generation = agents[j].generate_answer(
                         task_token_ids=task_token_ids,
                         task_attention_mask=task_attention_mask,
-                        upstream_prefix=upstream_prefix,
+                        upstream_prefix=terminal_upstream_prefix,
+                        upstream_texts=[upstream_texts for _ in range(task_token_ids.shape[0])]
+                        if upstream_texts is not None
+                        else None,
                         max_new_tokens=max_new_tokens,
                         return_metadata=True,
                         inference_mode=inference_mode,
-                        use_upstream_prefix=use_terminal_prefix,
+                        use_upstream_prefix=used_upstream_prefix,
                         do_sample=do_sample,
                     )
                     if collect_agent_logs:
@@ -140,8 +193,10 @@ class DAGExecutor:
                                 "system_prompt": agents[j].system_prompt,
                                 "received_upstream_prefix": upstream_prefix is not None,
                                 "upstream_prefix": summarize_tensor("upstream_prefix", upstream_prefix),
+                                "received_upstream_texts": bool(upstream_texts),
+                                "upstream_texts": upstream_texts,
                                 "inference_mode": inference_mode,
-                                "used_upstream_prefix": use_terminal_prefix,
+                                "used_upstream_prefix": used_upstream_prefix,
                                 "generated_text": generation["generated_text"],
                                 "generation": generation,
                             }

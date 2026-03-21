@@ -143,7 +143,9 @@ $$
 
 ### 5.3 终端 agent 的训练输入格式
 
-在训练阶段，终端 agent 使用 `forward_for_loss()`，输入形式为：
+在训练阶段，终端 agent 使用 `forward_for_loss()`。当前默认训练配置 `configs/experiments/gsm8k_5agent.yaml` 使用的是 `training.input_mode = chat_with_prefix`，但底层实现同时支持 legacy 与 chat 两条路径。
+
+若使用 `legacy_plain_with_prefix`，输入形式为：
 
 $$
 [z_T ; p_T ; x ; y]
@@ -159,6 +161,14 @@ $$
 
 这时模型通过 teacher forcing 预测答案部分 token，并在答案区域计算交叉熵损失。
 
+若使用当前默认的 `chat_with_prefix`，则问题侧文本会先被整理成 chat prompt，再与标准答案拼接，近似可写为：
+
+$$
+[z_T ; \mathrm{Chat}(p_T, x) ; y]
+$$
+
+这里 `system_prompt` 不再作为裸文本 token 直接拼在 question 前，而是作为 chat template 中的 system message 参与构造终端输入。
+
 ### 5.4 终端 agent 的评测输入格式
 
 在评测阶段，终端 agent 使用 `generate_answer()`，输入形式为：
@@ -169,20 +179,22 @@ $$
 
 此时不再拼接标准答案，而是让模型自回归生成输出文本。
 
-### 5.5 `legacy_plain_with_prefix` 与 `chat_with_prefix` 的区别
+当前评测额外还支持一个 inference-only 消融模式 `chat_with_text`。在这个模式下，通信介质不再是 latent prefix，而是文本消息。非终端 agent 会先生成文本，下游 agent 再把这些上游文本和原问题一起组织成 chat prompt。
 
-当前评测脚本中，终端 agent 的生成路径支持两种主要输入模式：
+### 5.5 `legacy_plain_with_prefix`、`chat_with_prefix` 与 `chat_with_text` 的区别
+
+当前评测脚本中，终端 agent 的生成路径支持三种主要输入模式：
 
 - `legacy_plain_with_prefix`
 - `chat_with_prefix`
+- `chat_with_text`
 
 它们的共同点是：
 
-- 都可以使用上游 agent 聚合得到的 latent prefix
 - 都会复用角色文件中的 `system_prompt`
 - 都是在终端 agent 的 `generate_answer()` 中执行
 
-它们的关键区别不在于“有没有 latent prefix”，而在于“问题侧文本输入是如何组织的”。
+它们的关键区别在于：跨 agent 的通信介质是什么，以及问题侧文本输入是如何组织的。
 
 #### 5.5.1 `legacy_plain_with_prefix`
 
@@ -223,7 +235,7 @@ model input:              [ z_T ][ role prompt ][ question ]
 
 #### 5.5.2 `chat_with_prefix`
 
-这是当前评测默认使用的路径。它会先把终端 agent 的文本输入构造成 chat prompt，而不是直接做裸 token 拼接。
+这是当前训练默认和评测默认都使用的路径。它会先把终端 agent 的文本输入构造成 chat prompt，而不是直接做裸 token 拼接。
 
 也就是说，问题侧文本先被整理成近似下面这种结构：
 
@@ -257,7 +269,39 @@ model input:              [ z_T ][ chat-formatted text ]
 
 因此，`chat_with_prefix` 不是“去掉了 role prompt”，而是把 role prompt 从“普通前缀 token”变成了“chat system message 的一部分”。
 
-#### 5.5.3 两种模式的对比图
+#### 5.5.3 `chat_with_text`
+
+这是当前仓库为消融实验额外加入的 inference-only 模式。它会把上游 agent 的输出改成文本消息，而不是连续 prefix embedding。
+
+终端 agent 的输入可近似写为：
+
+$$
+\mathrm{Chat}(p_T, m_1, m_2, \dots, x)
+$$
+
+其中：
+
+- $p_T$ 是终端 agent 的 system prompt
+- $m_i$ 是来自上游 agent 的文本消息
+- $x$ 是原始问题
+
+当前实现里，哪些上游消息会被传到当前节点，由 hard adjacency 决定，也就是边权大于 `0.5` 的边会被视为“启用”的文本通信边。
+
+可以把它画成：
+
+```text
+chat_with_text
+
+upstream text messages:   [ m_1 ][ m_2 ] ...
+chat-formatted text:      [ system: role prompt ]
+                          [ user: upstream messages + question ]
+                          [ assistant: ]
+model input:              [ chat-formatted text ]
+```
+
+在这条路径里，终端 agent 不使用 latent prefix，因此 `used_upstream_prefix = false`。
+
+#### 5.5.4 三种模式的对比图
 
 把终端 agent 的输入并排写出来，可以更清楚地看到差异：
 
@@ -267,6 +311,9 @@ Mode A: legacy_plain_with_prefix
 
 Mode B: chat_with_prefix
 [ latent prefix ][ chat(system=role prompt, user=question, assistant prompt) ]
+
+Mode C: chat_with_text
+[ chat(system=role prompt, user=upstream text messages + question, assistant prompt) ]
 ```
 
 如果进一步展开成更直观的示意：
@@ -281,9 +328,17 @@ chat_with_prefix
     text part:   [ <system>You are a solver ...</system>
                    <user>If Alice has 3 apples ...</user>
                    <assistant> ]
+
+chat_with_text
+    latent part: [ none ]
+    text part:   [ <system>You are a solver ...</system>
+                   <user>[Upstream message 1] ...
+                         [Upstream message 2] ...
+                         [Question] If Alice has 3 apples ...</user>
+                   <assistant> ]
 ```
 
-#### 5.5.4 为什么 `chat_with_prefix` 更适合当前 Qwen 模型
+#### 5.5.5 为什么 `chat_with_prefix` 更适合当前 Qwen 模型
 
 当前仓库使用的是 chat-style instruction model。对这类模型来说，输入如果符合它预训练/指令微调时习惯的 chat template，通常会比“把 system prompt 当普通文本硬拼在前面”更稳定。
 
@@ -292,9 +347,9 @@ chat_with_prefix
 - `legacy_plain_with_prefix` 更接近早期实现思路
 - `chat_with_prefix` 更接近当前 chat 模型的原生使用方式
 
-这也是为什么当前评测默认改成了 `chat_with_prefix`。
+这也是为什么当前训练默认和评测默认都改成了 `chat_with_prefix`。
 
-#### 5.5.5 `--no-terminal-prefix` 是什么关系
+#### 5.5.6 `--no-terminal-prefix` 是什么关系
 
 还需要特别区分一个独立开关：`--no-terminal-prefix`。
 
@@ -309,6 +364,7 @@ chat_with_prefix
 - `legacy_plain_with_prefix` + 使用 prefix
 - `chat_with_prefix` + 使用 prefix
 - `chat_with_prefix` + 不使用 prefix
+- `chat_with_text` + 文本消息通信
 
 最后一种可以近似写成：
 

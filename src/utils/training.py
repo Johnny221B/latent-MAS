@@ -5,6 +5,14 @@ import math
 import torch
 
 
+def build_ddp_kwargs(device_index: int) -> dict:
+    """Return the common DDP kwargs for trainable modules."""
+    return {
+        "device_ids": [device_index],
+        "find_unused_parameters": False,
+    }
+
+
 def validate_min_samples_for_batches(
     dataset_size: int,
     per_gpu_batch_size: int,

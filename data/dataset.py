@@ -47,6 +47,7 @@ class MultiAgentDataset(Dataset):
         self.data = raw
         self.question_field = task_config["question_field"]
         self.answer_field = task_config["answer_field"]
+        self.question_id_field = task_config["question_id_field"]
         self.answer_extractor = task_config.get("answer_extractor", None)
 
     def __len__(self) -> int:
@@ -55,6 +56,7 @@ class MultiAgentDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         item = self.data[idx]
         question = item[self.question_field]
+        question_id = item[self.question_id_field]
 
         # Extract clean answer
         raw_answer = item[self.answer_field]
@@ -64,6 +66,7 @@ class MultiAgentDataset(Dataset):
             answer = str(raw_answer)
 
         return {
+            "question_id": str(question_id),
             "question": question,
             "answer": answer,
         }
@@ -87,6 +90,7 @@ TASK_CONFIGS = {
     "gsm8k": {
         "dataset": "openai/gsm8k",
         "subset": "main",
+        "question_id_field": "id",
         "question_field": "question",
         "answer_field": "answer",
         "answer_extractor": _extract_gsm8k_answer,
@@ -94,6 +98,7 @@ TASK_CONFIGS = {
     "arc_easy": {
         "dataset": "allenai/ai2_arc",
         "subset": "ARC-Easy",
+        "question_id_field": "id",
         "question_field": "question",
         "answer_field": "answerKey",
         "answer_extractor": _extract_arc_answer,
@@ -101,6 +106,7 @@ TASK_CONFIGS = {
     "arc_challenge": {
         "dataset": "allenai/ai2_arc",
         "subset": "ARC-Challenge",
+        "question_id_field": "id",
         "question_field": "question",
         "answer_field": "answerKey",
         "answer_extractor": _extract_arc_answer,

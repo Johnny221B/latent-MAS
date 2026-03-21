@@ -64,10 +64,18 @@ class _FakeModel:
         )()
 
     def generate(self, inputs_embeds=None, attention_mask=None, max_new_tokens=None, do_sample=None, pad_token_id=None, return_dict_in_generate=None, **kwargs):
-        self.generate_inputs_embeds_shape = tuple(inputs_embeds.shape)
+        if inputs_embeds is not None:
+            batch_size = inputs_embeds.shape[0]
+            self.generate_inputs_embeds_shape = tuple(inputs_embeds.shape)
+            sequences = torch.tensor([[1, 2], [1, 2]], dtype=torch.long)[:batch_size]
+        else:
+            input_ids = kwargs["input_ids"]
+            batch_size = input_ids.shape[0]
+            self.generate_inputs_embeds_shape = None
+            new_tokens = torch.tensor([[1, 2], [1, 2]], dtype=torch.long)[:batch_size]
+            sequences = torch.cat([input_ids, new_tokens], dim=1)
         if attention_mask is not None:
             self.generate_attention_mask = attention_mask.detach().clone()
-        sequences = torch.tensor([[1, 2], [1, 2]], dtype=torch.long)[: inputs_embeds.shape[0]]
         return type("FakeGenerateOutput", (), {"sequences": sequences})()
 
 
@@ -189,3 +197,45 @@ def test_generate_answer_uses_unwrapped_model_for_ddp_generate():
 
     assert result["generated_text"] == "1|2"
     assert wrapped_model.generate_inputs_embeds_shape == (1, 3, 4)
+
+
+def test_generate_answer_chat_with_text_includes_upstream_messages_in_prompt():
+    class RecordingTokenizer(_FakeTokenizer):
+        def __init__(self):
+            self.last_messages = None
+
+        def apply_chat_template(
+            self, messages, tokenize=False, add_generation_prompt=True, enable_thinking=True
+        ):
+            self.last_messages = messages
+            return "rendered-chat"
+
+    base_model = _FakeBaseModel()
+    base_model.tokenizer = RecordingTokenizer()
+    agent = Agent(
+        agent_id=0,
+        role_config={
+            "role_name": "summarizer",
+            "system_prompt": "You summarize.",
+            "reasoning_steps": 4,
+            "compress_last_k": 4,
+        },
+        base_model=base_model,
+    )
+
+    result = agent.generate_answer(
+        task_token_ids=torch.tensor([[11, 12]], dtype=torch.long),
+        task_attention_mask=torch.ones(1, 2, dtype=torch.long),
+        upstream_prefix=None,
+        upstream_texts=[["reader says 1", "planner says 2"]],
+        max_new_tokens=3,
+        do_sample=False,
+        return_metadata=True,
+        inference_mode="chat_with_text",
+    )
+
+    assert result["generated_text"] == "1|2"
+    assert base_model.tokenizer.last_messages[0]["role"] == "system"
+    assert "reader says 1" in base_model.tokenizer.last_messages[1]["content"]
+    assert "planner says 2" in base_model.tokenizer.last_messages[1]["content"]
+    assert "question-0" in base_model.tokenizer.last_messages[1]["content"]

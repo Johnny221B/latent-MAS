@@ -39,6 +39,12 @@ bash scripts/train.sh
 configs/experiments/gsm8k_5agent.yaml
 ```
 
+其中当前默认训练输入模式是：
+
+```bash
+training.input_mode = chat_with_prefix
+```
+
 两卡训练示例：
 
 ```bash
