@@ -1,5 +1,5 @@
 model:
-  name: "Qwen/Qwen3-8B"
+  name: "Qwen/Qwen3-4B"
   frozen: true
 
 graph:
@@ -16,10 +16,10 @@ training:
   batch_size: 2
   lr: 0.0005
   weight_decay: 0.01
-  epochs: 8
+  epochs: 50
   max_seq_len: 2048
-  lambda_add: 0.1
-  lambda_drop: 0.005
+  lambda_add: 0.0
+  lambda_drop: 0.000
   lambda_sparse: 0.005
   gradient_accumulation_steps: 1
   log_interval: 1
@@ -30,12 +30,12 @@ reasoning:
   compress_last_k: 25
 
 evaluation:
-  max_new_tokens: 128
+  max_new_tokens: 2048
   train_probe_samples: 50
   test_probe_samples: 50
 
 output:
-  dir: "outputs/gsm8k_qwen3-8b_probe50"
+  dir: "outputs/gsm8k_qwen3-4b_probe50"
   log_dir: "logs"
 
 report:

@@ -1,6 +1,7 @@
 # ── Environment & Weights (large files, local only) ──
 envs/
 weights/
+baseline/
 
 # ── Python ──
 __pycache__/
