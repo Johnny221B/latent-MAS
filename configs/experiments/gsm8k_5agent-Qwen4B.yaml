@@ -31,5 +31,5 @@ reasoning:
   compress_last_k: 25       # only compress last k hidden states
 
 output:
-  dir: "outputs/gsm8k_qwen3-0.6b"
+  dir: "outputs/gsm8k_qwen3-4b"
   log_dir: "logs"
