@@ -205,3 +205,53 @@ Keep `docs/training_pipeline.md`, `docs/method.md`, companion docs, and `docs/RE
 - Promoted: AGENTS.md
 
 ---
+
+## [LRN-20260320-002] best_practice
+
+**Logged**: 2026-03-20T00:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+Train/eval loops for long-form generation must print a few live sample texts in the terminal and automatically flag obvious gibberish patterns.
+
+### Details
+Recent probe runs produced terminal generations that were visibly corrupted long before the final JSON artifacts were inspected. Relying on post-run `agent_logs.json` made the feedback loop too slow. The safer default is to print a small number of representative samples during evaluation, including `question`, `gold`, `prediction`, `finish_reason`, and a trimmed `generated_text` preview, then emit an explicit warning when the preview matches common gibberish patterns such as repeated `ДД`, repeated `Table...`, replacement characters, or extreme punctuation spam.
+
+### Suggested Action
+Keep preview printing enabled in evaluation paths and retain a lightweight gibberish heuristic so broken generations are visible immediately during training or live eval.
+
+### Metadata
+- Source: simplify-and-harden
+- Related Files: src/cli/evaluate.py
+- Tags: diagnostics, generation, eval, qwen3
+- Pattern-Key: harden.eval_generation_preview
+- Recurrence-Count: 1
+- First-Seen: 2026-03-20
+- Last-Seen: 2026-03-20
+
+---
+
+## [LRN-20260320-003] correction
+
+**Logged**: 2026-03-20T00:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+Before reporting whether a long-running training job is still active or has produced usable outputs, check both live processes and the actual output directory state.
+
+### Details
+I inferred that a recent run was still in progress because an earlier process check showed active training workers, but the user later pointed out the run should already be finished. Re-checking the current process list and output directories showed the workers were gone and only partial artifacts remained. For these long experiment loops, status can change quickly; relying on stale process observations leads to wrong progress reporting.
+
+### Suggested Action
+When summarizing experiment status, always re-check the current `ps` output and the latest files in the relevant `outputs/...` directory before making claims about whether a run is active or complete.
+
+### Metadata
+- Source: user_feedback
+- Related Files: outputs, .learnings/LEARNINGS.md
+- Tags: monitoring, experiments, correction
+
+---

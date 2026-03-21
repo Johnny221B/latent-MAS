@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-CUDA_VISIBLE_DEVICES=0,1 uv run --python .venv/bin/python -m vllm.entrypoints.openai.api_server \
+uv run --python .venv/bin/python -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen3-8B \
   --host 127.0.0.1 \
-  --port 8000 \
+  --port 8080 \
   --gpu-memory-utilization 0.85 \
   --max-model-len 4096 \
-  --api-key EMPTY
-#   --tensor-parallel-size 2 \
+  --api-key EMPTY \
+  --tensor-parallel-size 4 
 
 uv run --python .venv/bin/python src/cli/run_baseline_single_model.py \
     --model-name Qwen/Qwen3-8B \
