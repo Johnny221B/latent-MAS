@@ -34,7 +34,7 @@ $$
 
 ## 2. 数据定义
 
-数据处理逻辑定义在 [factory.py](../src/data/factory.py) 与 [base.py](../src/data/base.py)，具体数据集逻辑按任务拆分在 [gsm8k.py](../src/data/gsm8k.py)、[arc.py](../src/data/arc.py)、[humaneval.py](../src/data/humaneval.py)。
+数据处理逻辑定义在 [factory.py](../src/data/factory.py) 与 [base.py](../src/data/base.py)，具体数据集逻辑按任务拆分在 [gsm8k.py](../src/data/gsm8k.py)、[arc.py](../src/data/arc.py)、[competition_math.py](../src/data/competition_math.py)、[humaneval.py](../src/data/humaneval.py)。
 
 ### 2.1 当前支持的数据集
 
@@ -44,6 +44,7 @@ $$
 - `arc_easy`
 - `arc_challenge`
 - `humaneval`
+- `competition_math`
 
 这些任务在代码中被统一成相同的数据接口，每条样本最终都被处理为：
 
@@ -92,6 +93,20 @@ B. ...
 
 这意味着当前仓库里的 `humaneval` 结果主要用于调通 train/eval 链路和做本地对比，不能直接当作完整官方 HumanEval 榜单结果。
 
+`competition_math` 是当前新增的数学题训练任务。它来自 Hugging Face 数据集 `qwedsacf/competition_math`，当前实现只读取其唯一 `train` split，并整理成：
+
+```text
+{
+  "question_id": problem,
+  "question": problem,
+  "answer": <从 solution 中抽出的最终答案>,
+  "level": ...,
+  "type": ...
+}
+```
+
+其中答案抽取优先匹配 `\boxed{...}`，其次兼容 `final answer is ...` 这类尾部答案表达。当前不会做数学表达式的符号等价判定，相关准确率仍然基于规范化后的字符串 exact-match。
+
 ### 2.2 训练批次的输入形式
 
 在 dataloader 经过 `collate_fn` 后，一个 batch 的原始内容为：
@@ -110,6 +125,8 @@ B. ...
 
 当前默认实验配置 [gsm8k_5agent.yaml](../configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
 
+`competition_math` 也沿用这一路径；不同之处只在于监督答案来自 `solution` 中抽出的最终答案，而不是 GSM8K 的 `####` 段落。
+
 对 ARC 而言，这里的 `question` 已经是“原题 + Choices”拼接后的文本；chat template 不会再单独处理结构化 `choices` 字段。
 
 另外，当前评测路径额外支持 `evaluation.inference_mode = chat_with_text`。这个模式只用于推理期消融，不会改变训练；它的作用是把 agent 间通信从 latent prefix 改成文本消息，以便和原始 latent communication 做对照。
@@ -125,6 +142,14 @@ B. ...
 - 将返回的 `pass@k` 与路径信息汇总到 `eval_results.json`
 
 若本地没有安装 `human_eval`，或者没有启用其执行 harness，当前实现会直接报错，不会退回字符串匹配。
+
+`competition_math` 的默认实验路径与上述正式评测流不同：它默认关闭 `evaluation.run_after_train`，改为在训练期间通过 `training_probe` 配置做固定 `100` 条样本的 in-memory probe。具体行为是：
+
+- 从 `train` split 中按固定随机种子留出 `100` 条 probe-only 样本
+- 剩余样本进入训练 dataloader
+- 每隔若干个 optimizer step 跑一次 probe acc
+- probe 结果写到 `probe_history.json`
+- 若正式 run 启用 W&B，则按同一 `global_step` 上报 `probe/accuracy` 等指标
 
 ## 3. 模型组成
 

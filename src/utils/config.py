@@ -65,3 +65,13 @@ def _normalize_config(config: dict) -> None:
 
     evaluation_cfg = config.setdefault("evaluation", {})
     evaluation_cfg.setdefault("run_after_train", False)
+
+    probe_cfg = config.setdefault("training_probe", {})
+    probe_cfg.setdefault("enabled", False)
+    probe_cfg.setdefault("samples", 100)
+    probe_cfg.setdefault("seed", 42)
+    probe_cfg.setdefault("every_n_steps", 0)
+    probe_cfg.setdefault("batch_size", 1)
+    probe_cfg.setdefault("max_new_tokens", 64)
+    probe_cfg.setdefault("write_predictions_json", False)
+    probe_cfg.setdefault("write_agent_logs", False)

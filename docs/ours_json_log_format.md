@@ -6,6 +6,11 @@
 - `agent_logs.json`
 - `agent_log/<role>.json`
 
+对于 `competition_math` 这类只做 train-time probe 的任务，训练目录下还会额外出现：
+
+- `probe_split.json`
+- `probe_history.json`
+
 对于 `humaneval`，当前目录下还会额外出现：
 
 - `humaneval_samples.jsonl`
@@ -20,7 +25,57 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 如果使用 `evaluate.py --question "..." --output-dir <dir>` 或 [`scripts/inference.sh`](../scripts/inference.sh)，这些文件会写到指定的 `output_dir`，而不是 checkpoint 目录本身。
 
+`competition_math` 默认不通过 `evaluate.py` 产出上述 `eval_results.json` 作为主结果，而是通过训练期间的 `probe_history.json` 观察 acc 曲线。
+
 ---
+
+## 0. Training Probe Logs
+
+`probe_split.json` 用于记录这次训练固定留出的 probe 子集来源：
+
+```json
+[
+  {
+    "probe_indices": [3, 11, 25, 40],
+    "probe_size": 100,
+    "seed": 42
+  }
+]
+```
+
+`probe_history.json` 用于记录训练过程中每次 probe 触发后的结果：
+
+```json
+[
+  {
+    "global_step": 10,
+    "metrics": {
+      "accuracy": 12.0,
+      "correct": 12,
+      "total": 100,
+      "time_seconds": 88.4,
+      "avg_sample_seconds": 0.884,
+      "avg_generated_tokens": 54.2
+    },
+    "samples": [
+      {
+        "question_id": "...",
+        "question": "...",
+        "gold": "42",
+        "prediction": "40",
+        "correct": false,
+        "generation": { ... }
+      }
+    ]
+  }
+]
+```
+
+其中：
+
+- `global_step` 是触发 probe 时的 optimizer step
+- `metrics` 是当前 `100` 条 probe 子集上的聚合指标
+- `samples` 只在 `training_probe.write_predictions_json = true` 时写出
 
 ## 1. `eval_results.json`
 

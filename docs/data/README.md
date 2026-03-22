@@ -8,12 +8,14 @@
 - `arc_easy`
 - `arc_challenge`
 - `humaneval`
+- `competition_math`
 
 ## Files
 
 - `gsm8k.md`
 - `arc.md`
 - `humaneval.md`
+- `competition_math.md`
 
 ## Common Entry Points
 

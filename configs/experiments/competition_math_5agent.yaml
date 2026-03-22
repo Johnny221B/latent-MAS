@@ -1,0 +1,57 @@
+model:
+  name: "Qwen/Qwen3-8B"
+  frozen: true
+  dtype: "bfloat16"
+
+graph:
+  config: "configs/graphs/default_5agent.json"
+  roles_dir: "configs/roles"
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+
+training:
+  task: "competition_math"
+  train_strategy: "communication_only"
+  input_mode: "chat_with_prefix"
+  batch_size: 4
+  lr: 0.0005
+  weight_decay: 0.01
+  epochs: 1
+  max_seq_len: 2048
+  lambda_add: 0.1
+  lambda_drop: 0.005
+  lambda_sparse: 0.005
+  gradient_accumulation_steps: 1
+  log_interval: 1
+  save_interval: 1000
+
+training_probe:
+  enabled: true
+  samples: 0
+  seed: 42
+  every_n_steps: 10
+  batch_size: 4
+  max_new_tokens: 128
+  write_predictions_json: true
+  write_agent_logs: false
+
+evaluation:
+  run_after_train: false
+
+reasoning:
+  steps_per_agent: 25
+  compress_last_k: 25
+
+output:
+  dir: "outputs/competition_math_qwen3-8b"
+  log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

@@ -122,6 +122,25 @@ def test_arc_experiment_configs_enable_post_train_test_eval():
         assert loaded["evaluation"]["splits_after_train"] == ["test"]
 
 
+def test_competition_math_experiment_configs_use_probe_monitoring():
+    repo_root = Path(__file__).resolve().parent.parent
+    config_paths = [
+        repo_root / "configs/experiments/competition_math_5agent.yaml",
+        repo_root / "configs/experiments/competition_math_5agent_debug.yaml",
+    ]
+
+    for config_path in config_paths:
+        loaded = load_config(config_path)
+        assert loaded["training"]["task"] == "competition_math"
+        assert loaded["training"]["train_strategy"] == "communication_only"
+        assert loaded["evaluation"]["run_after_train"] is False
+        assert loaded["training_probe"]["enabled"] is True
+        assert loaded["training_probe"]["samples"] == 100
+
+    debug_loaded = load_config(config_paths[1])
+    assert debug_loaded["report"]["use_wandb"] is False
+
+
 def test_qwen3_4b_smoke_configs_are_small_and_disable_wandb():
     repo_root = Path(__file__).resolve().parent.parent
     config_paths = [

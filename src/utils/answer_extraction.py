@@ -78,6 +78,18 @@ def _extract_default(text: str) -> str:
     return text.strip()
 
 
+def _extract_competition_math(text: str) -> str:
+    boxed_match = re.search(r"\\boxed\s*{([^{}]+)}", text)
+    if boxed_match:
+        return boxed_match.group(1).strip()
+
+    match = re.search(r"(?:final answer|answer)\s*(?:is|:)\s*([^\n]+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().strip("$")
+
+    return _extract_default(text)
+
+
 # Registry of extractors
 EXTRACTORS = {
     "gsm8k": _extract_gsm8k,
@@ -85,4 +97,5 @@ EXTRACTORS = {
     "arc_easy": _extract_arc,
     "arc_challenge": _extract_arc,
     "medqa": _extract_arc,  # also multiple choice
+    "competition_math": _extract_competition_math,
 }

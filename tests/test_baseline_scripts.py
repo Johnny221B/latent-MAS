@@ -188,6 +188,15 @@ def test_extract_gsm8k_answer_normalizes_trailing_decimal_punctuation():
     assert extract_answer("#### 42.0", task_type="gsm8k") == "42"
 
 
+def test_extract_answer_competition_math_prefers_boxed_value():
+    from src.utils.answer_extraction import extract_answer
+
+    assert extract_answer(
+        "After simplification, the final answer is \\boxed{13}.",
+        task_type="competition_math",
+    ) == "13"
+
+
 def test_chat_with_prefix_generation_inputs_disable_thinking_by_default():
     class DummyTokenizer:
         def __init__(self):

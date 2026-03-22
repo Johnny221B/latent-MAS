@@ -121,19 +121,24 @@ $$
 当前仓库已经同时覆盖两类任务：
 
 - 文本答案任务，例如 `gsm8k`、`arc_*`
+- 数学题文本答案任务，例如 `competition_math`
 - 代码生成任务，例如 `humaneval`
 
 二者在训练阶段都可以写成监督学习的 `(x, y)` 形式，但 `y` 的语义不同：
 
 - 对 `gsm8k` 一类任务，`y` 是最终答案字符串
+- 对 `competition_math`，`y` 是从完整题解 `solution` 中抽取出的最终答案字符串
 - 对 `humaneval`，`y` 是代码补全 `canonical_solution`
 
 二者在评测阶段则显式分叉：
 
 - 文本答案任务使用答案抽取加 exact-match
+- `competition_math` 仍属于答案抽取加 exact-match，但答案抽取优先读取 `\boxed{...}`
 - `humaneval` 使用代码执行型 functional correctness，并汇总成 `pass@k`
 
 因此，当前方法的 communication layer 是共享的，但最终任务指标不再假设所有任务都可被约化为单一字符串准确率。
+
+对于 `competition_math`，当前默认反馈信号不是训练结束后的整套 eval，而是训练过程中的固定 `100` 条 probe 子集准确率。这个 probe 子集不参与梯度更新，作用是观察 communication layer 学到的表示是否随着 `global_step` 推进而提升答案正确率。
 
 ### 关于信息传递机制的开放设计问题
 

@@ -18,6 +18,7 @@
 - `docs/data/gsm8k.md`
 - `docs/data/arc.md`
 - `docs/data/humaneval.md`
+- `docs/data/competition_math.md`
 
 当前数据模块源码位于 `src/data/`，并按数据集拆分为独立模块，不再使用根目录 `data/` 包。
 
@@ -41,3 +42,12 @@
 - 该链路适合调试与本地比较
 - `pass@k` 仍由官方 `human_eval` harness 计算
 - 结果不能直接当作完整官方 HumanEval 基准分数引用
+
+## Current competition_math Status
+
+当前仓库已支持 `competition_math` 训练接入，但默认只做训练期 probe 监控，不做正式 post-train eval：
+
+- 从唯一 `train` split 中固定留出 `100` 条样本作为 `probe`
+- `probe` 不参与梯度更新
+- 训练过程中按 `global_step` 记录 `probe accuracy`
+- 调试配置默认禁用 W&B；正式配置才会上报线上 run

@@ -12,24 +12,28 @@ Specific GPUs:
 """
 
 import argparse
+import copy
 import os
 import sys
 import time
 from pathlib import Path
 import csv
 from datetime import datetime
+import json
+import random
 
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 from torch.optim import AdamW
 
 from src.utils.config import load_config
 from src.utils.output_paths import build_timestamped_output_dir
 from src.utils.reporting import finish_wandb, init_wandb_run, log_wandb
+from src.utils.answer_extraction import extract_answer
 from src.utils.token_utils import append_eos_token
 from src.utils.training import (
     build_ddp_kwargs,
@@ -38,15 +42,18 @@ from src.utils.training import (
     validate_min_samples_for_batches,
 )
 from src.pipeline.multi_agent_system import MultiAgentSystem
-from src.cli.evaluate import evaluate_loaded_system
+from src.cli.evaluate import evaluate_loaded_system, gather_sharded_objects, is_main_process as is_eval_main_process, shard_dataset
 from src.data import create_dataset
 
 
 def collate_fn(batch: list[dict]) -> dict:
-    return {
+    payload = {
         "questions": [item["question"] for item in batch],
         "answers": [item["answer"] for item in batch],
     }
+    if batch and "question_id" in batch[0]:
+        payload["question_ids"] = [item["question_id"] for item in batch]
+    return payload
 
 
 def format_duration(seconds: float) -> str:
@@ -103,10 +110,170 @@ def resolve_post_train_eval_plan(evaluation_cfg: dict) -> list[tuple[str, int | 
     return eval_plan
 
 
+def split_training_and_probe_subsets(
+    dataset,
+    *,
+    probe_samples: int,
+    seed: int,
+):
+    total = len(dataset)
+    if probe_samples <= 0:
+        return dataset, None, []
+    if total <= probe_samples:
+        raise ValueError(
+            f"Probe split requires more samples than available: total={total}, probe_samples={probe_samples}"
+        )
+
+    shuffled_indices = list(range(total))
+    random.Random(seed).shuffle(shuffled_indices)
+    probe_indices = sorted(shuffled_indices[:probe_samples])
+    train_indices = sorted(shuffled_indices[probe_samples:])
+    return (
+        Subset(dataset, train_indices),
+        Subset(dataset, probe_indices),
+        probe_indices,
+    )
+
+
+def should_run_training_probe(global_step: int, probe_cfg: dict) -> bool:
+    interval = int(probe_cfg.get("every_n_steps", 0))
+    return bool(probe_cfg.get("enabled")) and interval > 0 and global_step > 0 and global_step % interval == 0
+
+
+def evaluate_training_probe(
+    *,
+    system,
+    dataset,
+    config: dict,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    batch_size: int,
+    max_new_tokens: int,
+    inference_mode: str,
+    use_terminal_prefix: bool,
+    write_agent_logs: bool,
+):
+    if dataset is None:
+        return None
+
+    sharded_dataset = shard_dataset(dataset, rank, world_size)
+    dataloader = DataLoader(sharded_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    results = []
+
+    system_was_training = getattr(system, "training", False)
+    system.eval()
+    with torch.no_grad():
+        for batch in dataloader:
+            t0 = time.time()
+            tokenized = system.base_model.tokenize(
+                batch["questions"],
+                max_length=config["training"].get("max_seq_len", 2048),
+            )
+            task_ids = tokenized["input_ids"].to(device)
+            task_mask = tokenized["attention_mask"].to(device)
+
+            output = system(
+                task_token_ids=task_ids,
+                task_attention_mask=task_mask,
+                max_new_tokens=max_new_tokens,
+                inference_mode=inference_mode,
+                use_terminal_prefix=use_terminal_prefix,
+                do_sample=False,
+                collect_agent_logs=write_agent_logs,
+            )
+            generated_text = output["generated_text"]
+            generation = output.get("generation", {})
+            batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
+            batch_elapsed = time.time() - t0
+            per_sample_seconds = batch_elapsed / max(len(batch["questions"]), 1)
+
+            for sample_idx, question in enumerate(batch["questions"]):
+                prediction = extract_answer(batch_generated_text[sample_idx], task_type=config["training"]["task"])
+                gold = batch["answers"][sample_idx].strip()
+                is_correct = prediction.strip() == gold
+                sample_generation = {
+                    key: value[sample_idx] if isinstance(value, list) else value
+                    for key, value in generation.items()
+                }
+                results.append(
+                    {
+                        "question_id": batch["question_ids"][sample_idx],
+                        "question": question,
+                        "gold": gold,
+                        "prediction": prediction,
+                        "correct": is_correct,
+                        "sample_seconds": per_sample_seconds,
+                        "generation": sample_generation,
+                    }
+                )
+    gathered_results = gather_sharded_objects(results, rank, world_size)
+    if system_was_training:
+        system.train()
+
+    if not is_eval_main_process(rank):
+        return None
+
+    merged_results = []
+    for shard_results in gathered_results:
+        if shard_results is None:
+            continue
+        merged_results.extend(shard_results)
+    merged_results.sort(key=lambda item: str(item["question_id"]))
+
+    correct = sum(int(sample["correct"]) for sample in merged_results)
+    total = len(merged_results)
+    sample_durations = [float(sample.get("sample_seconds", 0.0)) for sample in merged_results]
+    generated_token_counts = [
+        float(sample.get("generation", {}).get("generated_token_count", 0))
+        for sample in merged_results
+    ]
+    accuracy = correct / total * 100 if total > 0 else 0.0
+    return {
+        "metrics": {
+            "accuracy": accuracy,
+            "correct": correct,
+            "total": total,
+            "time_seconds": sum(sample_durations),
+            "avg_sample_seconds": (sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+            "avg_generated_tokens": (
+                sum(generated_token_counts) / len(generated_token_counts)
+            ) if generated_token_counts else None,
+        },
+        "samples": merged_results,
+    }
+
+
+def write_probe_history_json(path: Path, history: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2, ensure_ascii=False)
+
+
+def maybe_build_probe_wandb_table(run, samples: list[dict]):
+    if run is None:
+        return None
+    try:
+        import wandb
+    except ImportError:
+        return None
+
+    table = wandb.Table(columns=["question_id", "gold", "prediction", "correct"])
+    for sample in samples:
+        table.add_data(
+            str(sample["question_id"]),
+            sample["gold"],
+            sample["prediction"],
+            sample["correct"],
+        )
+    return table
+
+
 def train(config_path: str, max_samples: int | None = None):
     config = load_config(config_path)
     training_cfg = config["training"]
     evaluation_cfg = config.get("evaluation", {})
+    probe_cfg = config.get("training_probe", {})
     training_input_mode = training_cfg.get("input_mode", "legacy_plain_with_prefix")
 
     # ── Setup device ──
@@ -159,6 +326,14 @@ def train(config_path: str, max_samples: int | None = None):
         split="train",
         max_samples=max_samples,
     )
+    probe_dataset = None
+    probe_indices = []
+    if probe_cfg.get("enabled", False):
+        dataset, probe_dataset, probe_indices = split_training_and_probe_subsets(
+            dataset,
+            probe_samples=int(probe_cfg.get("samples", 100)),
+            seed=int(probe_cfg.get("seed", 42)),
+        )
     drop_last = training_cfg.get("drop_last", True)
     validate_min_samples_for_batches(
         dataset_size=len(dataset),
@@ -180,6 +355,8 @@ def train(config_path: str, max_samples: int | None = None):
 
     if is_main_process():
         print(f"Dataset size: {len(dataset)}")
+        if probe_dataset is not None:
+            print(f"Probe samples held out: {len(probe_dataset)}")
         print(f"Per-GPU batch size: {training_cfg['batch_size']}")
         print(f"Effective batch size: {training_cfg['batch_size'] * world_size}")
         print(f"Batches per epoch per GPU: {len(dataloader)}")
@@ -219,6 +396,20 @@ def train(config_path: str, max_samples: int | None = None):
 
     # ── Loss log ──
     loss_log = []  # list of dicts, saved to CSV
+    probe_history = []
+    probe_history_path = output_dir / "probe_history.json"
+    probe_metadata_path = output_dir / "probe_split.json"
+    if is_main_process() and probe_dataset is not None:
+        write_probe_history_json(
+            probe_metadata_path,
+            [
+                {
+                    "probe_indices": probe_indices,
+                    "probe_size": len(probe_dataset),
+                    "seed": int(probe_cfg.get("seed", 42)),
+                }
+            ],
+        )
 
     global_step = 0
     train_start = time.time()
@@ -308,6 +499,51 @@ def train(config_path: str, max_samples: int | None = None):
                             "train/epoch": epoch + 1,
                             "train/batch": batch_idx + 1,
                         },
+                        step=global_step,
+                    )
+                probe_result = None
+                if should_run_training_probe(global_step, probe_cfg):
+                    probe_result = evaluate_training_probe(
+                        system=system,
+                        dataset=probe_dataset,
+                        config=config,
+                        device=device,
+                        rank=rank,
+                        world_size=world_size,
+                        batch_size=int(probe_cfg.get("batch_size", 1)),
+                        max_new_tokens=int(probe_cfg.get("max_new_tokens", 64)),
+                        inference_mode=evaluation_cfg.get("inference_mode", "chat_with_prefix"),
+                        use_terminal_prefix=evaluation_cfg.get("use_terminal_prefix", True),
+                        write_agent_logs=bool(probe_cfg.get("write_agent_logs", False)),
+                    )
+                if is_main_process() and probe_result is not None:
+                    probe_record = {
+                        "global_step": global_step,
+                        "metrics": copy.deepcopy(probe_result["metrics"]),
+                    }
+                    if probe_cfg.get("write_predictions_json", False):
+                        probe_record["samples"] = copy.deepcopy(probe_result["samples"])
+                    probe_history.append(probe_record)
+                    write_probe_history_json(probe_history_path, probe_history)
+                    print(
+                        f"  Probe@{global_step} | "
+                        f"Acc:{probe_result['metrics']['accuracy']:.2f}% "
+                        f"({probe_result['metrics']['correct']}/{probe_result['metrics']['total']}) | "
+                        f"time:{probe_result['metrics']['time_seconds']:.1f}s"
+                    )
+                    probe_payload = {
+                        "probe/accuracy": probe_result["metrics"]["accuracy"],
+                        "probe/correct": probe_result["metrics"]["correct"],
+                        "probe/total": probe_result["metrics"]["total"],
+                        "probe/time_seconds": probe_result["metrics"]["time_seconds"],
+                        "probe/avg_sample_seconds": probe_result["metrics"]["avg_sample_seconds"],
+                    }
+                    table = maybe_build_probe_wandb_table(wandb_run, probe_result["samples"])
+                    if table is not None:
+                        probe_payload["probe/samples"] = table
+                    log_wandb(
+                        wandb_run,
+                        probe_payload,
                         step=global_step,
                     )
                 optimizer.zero_grad()
@@ -448,6 +684,9 @@ def train(config_path: str, max_samples: int | None = None):
             {
                 "final/global_step": global_step,
                 "final/output_dir": str(output_dir),
+                "final/probe_accuracy": (
+                    probe_history[-1]["metrics"]["accuracy"] if probe_history else None
+                ),
                 "final/train_accuracy": (
                     eval_summaries.get("train", {})
                     .get("metrics", {})

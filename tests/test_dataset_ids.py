@@ -14,7 +14,7 @@ from src.data import get_task_configs
 def test_dataset_factory_registry_contains_supported_tasks():
     task_configs = get_task_configs()
 
-    assert {"gsm8k", "arc_easy", "arc_challenge", "humaneval"} <= set(task_configs)
+    assert {"gsm8k", "arc_easy", "arc_challenge", "humaneval", "competition_math"} <= set(task_configs)
 
 
 def test_dataset_returns_question_id_from_raw_record():
@@ -191,3 +191,44 @@ def test_humaneval_dataset_rejects_validation_split(monkeypatch):
 
     with pytest.raises(ValueError, match="Unsupported split"):
         MultiAgentDataset(task="humaneval", split="validation")
+
+
+def test_competition_math_dataset_extracts_boxed_answer(monkeypatch):
+    from src.data import competition_math as dataset_module
+
+    raw_rows = [
+        {
+            "problem": "Compute 6 * 7.",
+            "solution": "We get 42, so the final answer is \\boxed{42}.",
+            "level": "Level 1",
+            "type": "algebra",
+        }
+    ]
+
+    class DummyRawDataset:
+        def __init__(self, rows):
+            self.rows = list(rows)
+
+        def __len__(self):
+            return len(self.rows)
+
+        def __getitem__(self, idx):
+            return self.rows[idx]
+
+        def select(self, indices):
+            return DummyRawDataset([self.rows[idx] for idx in indices])
+
+    monkeypatch.setattr(
+        dataset_module,
+        "_load_hf_dataset",
+        lambda dataset_name, subset, split: DummyRawDataset(raw_rows),
+    )
+
+    dataset = MultiAgentDataset(task="competition_math", split="train")
+    sample = dataset[0]
+
+    assert sample["question_id"] == "Compute 6 * 7."
+    assert sample["question"] == "Compute 6 * 7."
+    assert sample["answer"] == "42"
+    assert sample["level"] == "Level 1"
+    assert sample["type"] == "algebra"
