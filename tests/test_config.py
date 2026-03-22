@@ -88,3 +88,31 @@ def test_probe64_configs_disable_final_checkpoint_and_enable_live_eval():
         assert loaded["training"]["batch_size"] == 32
         assert loaded["training"]["save_final_checkpoint"] is False
         assert loaded["evaluation"]["run_after_train"] is True
+
+
+def test_humaneval_experiment_config_declares_pass_at_k_settings():
+    repo_root = Path(__file__).resolve().parent.parent
+    config_path = repo_root / "configs/experiments/humaneval_5agent.yaml"
+
+    loaded = load_config(config_path)
+
+    assert loaded["training"]["task"] == "humaneval"
+    assert loaded["evaluation"]["metric"] == "pass_at_k"
+    assert loaded["evaluation"]["split_scheme"] == "debug_60_40"
+    assert loaded["evaluation"]["num_samples_per_task"] == 20
+    assert loaded["evaluation"]["pass_at_k"] == [1, 10]
+    assert loaded["evaluation"]["do_sample"] is True
+
+
+def test_arc_experiment_configs_enable_post_train_test_eval():
+    repo_root = Path(__file__).resolve().parent.parent
+    config_paths = [
+        repo_root / "configs/experiments/arc_easy_5agent.yaml",
+        repo_root / "configs/experiments/arc_challenge_5agent.yaml",
+    ]
+
+    for config_path in config_paths:
+        loaded = load_config(config_path)
+        assert loaded["training"]["task"] in {"arc_easy", "arc_challenge"}
+        assert loaded["evaluation"]["run_after_train"] is True
+        assert loaded["evaluation"]["splits_after_train"] == ["test"]

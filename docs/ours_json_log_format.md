@@ -6,6 +6,12 @@
 - `agent_logs.json`
 - `agent_log/<role>.json`
 
+对于 `humaneval`，当前目录下还会额外出现：
+
+- `humaneval_samples.jsonl`
+- `humaneval_problems.jsonl`
+- `humaneval_samples.jsonl_results.jsonl`
+
 这两个文件通常保存在同一个 checkpoint 目录下，例如：
 
 ```text
@@ -18,7 +24,7 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 ## 1. `eval_results.json`
 
-这个文件用于保存 `ours` 的主评测结果。它既包含整体指标，也包含逐条样本的结果。
+这个文件用于保存 `ours` 的主评测结果。对于答案匹配任务，它既包含整体指标，也包含逐条样本的结果。对于 `humaneval`，它会改为保存 `pass@k`、样本文件路径以及每条 completion。
 
 ### 顶层字段
 
@@ -52,6 +58,8 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 - `samples`
   每条样本的结果列表。
+
+对 `humaneval`，顶层还会额外带一个 `artifacts` 字段，用来记录 `samples.jsonl`、`problems.jsonl` 与官方结果文件路径。
 
 ### `metrics` 字段
 
@@ -89,6 +97,23 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 - `avg_tokens_per_second`
   用 `generated_token_count / sample_seconds` 汇总得到的整体生成吞吐。
+
+对 `humaneval`，`metrics` 的核心字段会变成：
+
+```json
+{
+  "pass@1": 0.25,
+  "pass@10": 0.6,
+  "time_seconds": 120.0,
+  "num_tasks": 65,
+  "num_samples_per_task": 20,
+  "total_samples": 1300,
+  "pass_at_k": [1, 10],
+  "split_scheme": "debug_60_40"
+}
+```
+
+这里的 `split_scheme = "debug_60_40"` 明确表示当前仓库把官方单一 HumanEval 题集切成了本地 `60/40` train/test 调试划分，因此该结果不能直接视为完整官方榜单分数。
 
 ### `parameters` 字段
 

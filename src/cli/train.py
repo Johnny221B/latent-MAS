@@ -94,6 +94,15 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+def resolve_post_train_eval_plan(evaluation_cfg: dict) -> list[tuple[str, int | None]]:
+    split_names = evaluation_cfg.get("splits_after_train", ["train", "test"])
+    eval_plan = []
+    for split_name in split_names:
+        sample_limit = evaluation_cfg.get(f"{split_name}_probe_samples")
+        eval_plan.append((split_name, sample_limit))
+    return eval_plan
+
+
 def train(config_path: str, max_samples: int | None = None):
     config = load_config(config_path)
     training_cfg = config["training"]
@@ -406,10 +415,7 @@ def train(config_path: str, max_samples: int | None = None):
             "world_size": world_size,
             "is_dist": is_ddp,
         }
-        for split_name, sample_limit in (
-            ("train", evaluation_cfg.get("train_probe_samples")),
-            ("test", evaluation_cfg.get("test_probe_samples")),
-        ):
+        for split_name, sample_limit in resolve_post_train_eval_plan(evaluation_cfg):
             if is_main_process():
                 print(f"\nStarting post-train evaluation on {split_name} split...")
             eval_summary = evaluate_loaded_system(

@@ -2,6 +2,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -265,6 +266,436 @@ def test_evaluate_loaded_system_accepts_chat_with_text_mode(tmp_path: Path, monk
     assert result["metrics"]["correct"] == 1
 
 
+def test_evaluate_loaded_system_scores_arc_letter_predictions(tmp_path: Path, monkeypatch):
+    from src.cli import evaluate as evaluate_module
+
+    class DummyBaseModel:
+        def tokenize(self, texts, max_length=2048, add_special_tokens=True):
+            batch = len(texts)
+            return {
+                "input_ids": torch.ones(batch, 3, dtype=torch.long),
+                "attention_mask": torch.ones(batch, 3, dtype=torch.long),
+            }
+
+    class DummySystem:
+        def __init__(self):
+            self.base_model = DummyBaseModel()
+
+        def eval(self):
+            return self
+
+        def __call__(
+            self,
+            task_token_ids,
+            task_attention_mask=None,
+            max_new_tokens=0,
+            inference_mode="chat_with_prefix",
+            use_terminal_prefix=True,
+            do_sample=False,
+            collect_agent_logs=False,
+        ):
+            batch = task_token_ids.shape[0]
+            return {
+                "generated_text": ["The answer is B"] * batch,
+                "generation": {
+                    "generated_text": ["The answer is B"] * batch,
+                    "finish_reason": ["eos"] * batch,
+                    "generated_token_count": [4] * batch,
+                    "stopped_early": [True] * batch,
+                    "inference_mode": [inference_mode] * batch,
+                    "used_upstream_prefix": [use_terminal_prefix] * batch,
+                },
+                "agent_logs": [],
+            }
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "create_dataset",
+        lambda task, split, max_samples=None: [
+            {
+                "question_id": "arc-test-1",
+                "question": "Which planet is known as the Red Planet?\n\nChoices:\nA. Earth\nB. Mars",
+                "answer": "B",
+            }
+        ],
+    )
+
+    result = evaluate_module.evaluate_loaded_system(
+        system=DummySystem(),
+        config={"training": {"task": "arc_easy", "max_seq_len": 32}},
+        config_path="dummy-config.yaml",
+        output_dir=tmp_path,
+        checkpoint_path=None,
+        max_samples=1,
+        split="test",
+        max_new_tokens=8,
+        inference_mode="chat_with_prefix",
+        use_terminal_prefix=True,
+        run_baseline=False,
+        do_sample=False,
+        write_agent_logs=False,
+        worker=None,
+        batch_size=1,
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=1,
+        is_dist=False,
+    )
+
+    payload = json.loads((tmp_path / "eval_results.json").read_text())
+    assert payload["metrics"]["correct"] == 1
+    assert payload["task"] == "arc_easy"
+    assert payload["samples"][0]["prediction"] == "B"
+    assert result["metrics"]["correct"] == 1
+
+
+def test_evaluate_loaded_system_writes_humaneval_samples_and_pass_at_k(tmp_path: Path, monkeypatch):
+    from src.cli import evaluate as evaluate_module
+
+    class DummyBaseModel:
+        def tokenize(self, texts, max_length=2048, add_special_tokens=True):
+            batch = len(texts)
+            return {
+                "input_ids": torch.ones(batch, 4, dtype=torch.long),
+                "attention_mask": torch.ones(batch, 4, dtype=torch.long),
+            }
+
+    class DummySystem:
+        def __init__(self):
+            self.base_model = DummyBaseModel()
+            self.calls = []
+
+        def eval(self):
+            return self
+
+        def __call__(
+            self,
+            task_token_ids,
+            task_attention_mask=None,
+            max_new_tokens=0,
+            inference_mode="chat_with_prefix",
+            use_terminal_prefix=True,
+            do_sample=False,
+            collect_agent_logs=False,
+        ):
+            self.calls.append(
+                {
+                    "batch": task_token_ids.shape[0],
+                    "do_sample": do_sample,
+                    "inference_mode": inference_mode,
+                    "use_terminal_prefix": use_terminal_prefix,
+                }
+            )
+            batch = task_token_ids.shape[0]
+            return {
+                "generated_text": ["def add_one(x):\n    return x + 1"] * batch,
+                "generation": {
+                    "generated_text": ["def add_one(x):\n    return x + 1"] * batch,
+                    "finish_reason": ["eos"] * batch,
+                    "generated_token_count": [6] * batch,
+                    "stopped_early": [True] * batch,
+                    "inference_mode": [inference_mode] * batch,
+                    "used_upstream_prefix": [use_terminal_prefix] * batch,
+                },
+                "agent_logs": [],
+            }
+
+    humaneval_dataset = [
+        {
+            "question_id": "HumanEval/0",
+            "question": "def add_one(x):\n    ",
+            "answer": "return x + 1",
+            "task_id": "HumanEval/0",
+            "prompt": "def add_one(x):\n    ",
+            "canonical_solution": "return x + 1",
+            "test": "assert add_one(1) == 2",
+            "entry_point": "add_one",
+        },
+        {
+            "question_id": "HumanEval/1",
+            "question": "def add_two(x):\n    ",
+            "answer": "return x + 2",
+            "task_id": "HumanEval/1",
+            "prompt": "def add_two(x):\n    ",
+            "canonical_solution": "return x + 2",
+            "test": "assert add_two(1) == 3",
+            "entry_point": "add_two",
+        },
+    ]
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "create_dataset",
+        lambda task, split, max_samples=None: humaneval_dataset,
+    )
+    monkeypatch.setattr(
+        evaluate_module,
+        "extract_answer",
+        lambda text, task_type: text.strip(),
+    )
+    monkeypatch.setattr(
+        evaluate_module,
+        "_evaluate_humaneval_samples",
+        lambda sample_path, *, num_samples_per_task, pass_at_k, config, problems, output_dir: {
+            "metrics": {"pass@1": 0.5, "pass@10": 1.0},
+            "results_path": str(sample_path) + "_results.jsonl",
+            "problem_path": "unused",
+            "pass_at_k": list(pass_at_k),
+        },
+    )
+
+    system = DummySystem()
+    result = evaluate_module.evaluate_loaded_system(
+        system=system,
+        config={
+            "training": {"task": "humaneval", "max_seq_len": 32},
+            "evaluation": {
+                "num_samples_per_task": 2,
+                "pass_at_k": [1, 10],
+                "do_sample": True,
+                "temperature": 0.8,
+            },
+        },
+        config_path="dummy-config.yaml",
+        output_dir=tmp_path,
+        checkpoint_path=None,
+        max_samples=2,
+        split="test",
+        max_new_tokens=8,
+        inference_mode="chat_with_prefix",
+        use_terminal_prefix=True,
+        run_baseline=False,
+        do_sample=True,
+        write_agent_logs=False,
+        worker=None,
+        batch_size=1,
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=1,
+        is_dist=False,
+    )
+
+    sample_path = tmp_path / "humaneval_samples.jsonl"
+    eval_payload = json.loads((tmp_path / "eval_results.json").read_text())
+
+    assert sample_path.exists()
+    sample_lines = sample_path.read_text().strip().splitlines()
+    assert len(sample_lines) == 4
+    first_row = json.loads(sample_lines[0])
+    assert first_row["task_id"] == "HumanEval/0"
+    assert "completion" in first_row
+    assert eval_payload["metrics"]["pass@1"] == 0.5
+    assert eval_payload["metrics"]["pass@10"] == 1.0
+    assert result["metrics"]["pass@1"] == 0.5
+    assert result["paths"]["samples_path"].endswith("humaneval_samples.jsonl")
+    assert result["paths"]["results_path"].endswith("_results.jsonl")
+    assert system.calls and system.calls[0]["do_sample"] is True
+
+
+def test_evaluate_loaded_system_humaneval_hard_fails_without_human_eval(tmp_path: Path, monkeypatch):
+    from src.cli import evaluate as evaluate_module
+
+    class DummyBaseModel:
+        def tokenize(self, texts, max_length=2048, add_special_tokens=True):
+            batch = len(texts)
+            return {
+                "input_ids": torch.ones(batch, 4, dtype=torch.long),
+                "attention_mask": torch.ones(batch, 4, dtype=torch.long),
+            }
+
+    class DummySystem:
+        def __init__(self):
+            self.base_model = DummyBaseModel()
+
+        def eval(self):
+            return self
+
+        def __call__(self, *args, **kwargs):
+            task_token_ids = kwargs["task_token_ids"]
+            return {
+                "generated_text": ["pass"] * task_token_ids.shape[0],
+                "generation": {
+                    "generated_text": ["pass"] * task_token_ids.shape[0],
+                    "finish_reason": ["eos"] * task_token_ids.shape[0],
+                    "generated_token_count": [1] * task_token_ids.shape[0],
+                    "stopped_early": [True] * task_token_ids.shape[0],
+                    "inference_mode": [kwargs.get("inference_mode", "chat_with_prefix")] * task_token_ids.shape[0],
+                    "used_upstream_prefix": [kwargs.get("use_terminal_prefix", True)] * task_token_ids.shape[0],
+                },
+                "agent_logs": [],
+            }
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "create_dataset",
+        lambda task, split, max_samples=None: [
+            {
+                "question_id": "HumanEval/0",
+                "question": "def add_one(x):\n    ",
+                "answer": "return x + 1",
+                "task_id": "HumanEval/0",
+                "prompt": "def add_one(x):\n    ",
+                "canonical_solution": "return x + 1",
+                "test": "assert add_one(1) == 2",
+                "entry_point": "add_one",
+            }
+        ],
+    )
+    monkeypatch.setattr(evaluate_module, "_import_human_eval_evaluation", lambda: None)
+
+    with pytest.raises(RuntimeError, match="human_eval"):
+        evaluate_module.evaluate_loaded_system(
+            system=DummySystem(),
+            config={
+                "training": {"task": "humaneval", "max_seq_len": 32},
+                "evaluation": {"num_samples_per_task": 1, "pass_at_k": [1]},
+            },
+            config_path="dummy-config.yaml",
+            output_dir=tmp_path,
+            checkpoint_path=None,
+            max_samples=1,
+            split="test",
+            max_new_tokens=8,
+            inference_mode="chat_with_prefix",
+            use_terminal_prefix=True,
+            run_baseline=False,
+            do_sample=True,
+            write_agent_logs=False,
+            worker=None,
+            batch_size=1,
+            device=torch.device("cpu"),
+            rank=0,
+            world_size=1,
+            is_dist=False,
+        )
+
+
+def test_evaluate_loaded_system_humaneval_writes_agent_logs(tmp_path: Path, monkeypatch):
+    from src.cli import evaluate as evaluate_module
+
+    class DummyBaseModel:
+        def tokenize(self, texts, max_length=2048, add_special_tokens=True):
+            batch = len(texts)
+            return {
+                "input_ids": torch.ones(batch, 4, dtype=torch.long),
+                "attention_mask": torch.ones(batch, 4, dtype=torch.long),
+            }
+
+    class DummySystem:
+        def __init__(self):
+            self.base_model = DummyBaseModel()
+
+        def eval(self):
+            return self
+
+        def __call__(
+            self,
+            task_token_ids,
+            task_attention_mask=None,
+            max_new_tokens=0,
+            inference_mode="chat_with_prefix",
+            use_terminal_prefix=True,
+            do_sample=False,
+            collect_agent_logs=False,
+        ):
+            batch = task_token_ids.shape[0]
+            return {
+                "generated_text": ["return x + 1"] * batch,
+                "generation": {
+                    "generated_text": ["return x + 1"] * batch,
+                    "finish_reason": ["eos"] * batch,
+                    "generated_token_count": [4] * batch,
+                    "stopped_early": [True] * batch,
+                },
+                "agent_logs": [
+                    {
+                        "agent_id": 0,
+                        "role_name": "reader",
+                        "output_type": "text_message",
+                        "system_prompt": "read",
+                        "received_upstream_texts": False,
+                        "upstream_texts": [],
+                        "generated_text": "inspect signature",
+                        "generation": {"generated_text": "inspect signature"},
+                    },
+                    {
+                        "agent_id": 1,
+                        "role_name": "solver",
+                        "output_type": "text",
+                        "system_prompt": "solve",
+                        "received_upstream_texts": True,
+                        "upstream_texts": ["inspect signature"],
+                        "generated_text": "return x + 1",
+                        "generation": {"generated_text": "return x + 1"},
+                    },
+                ] if collect_agent_logs else [],
+            }
+
+    humaneval_dataset = [
+        {
+            "question_id": "HumanEval/0",
+            "question": "def add_one(x):\n    ",
+            "answer": "return x + 1",
+            "task_id": "HumanEval/0",
+            "prompt": "def add_one(x):\n    ",
+            "canonical_solution": "return x + 1",
+            "test": "assert add_one(1) == 2",
+            "entry_point": "add_one",
+        }
+    ]
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "create_dataset",
+        lambda task, split, max_samples=None: humaneval_dataset,
+    )
+    monkeypatch.setattr(
+        evaluate_module,
+        "_evaluate_humaneval_samples",
+        lambda sample_path, *, num_samples_per_task, pass_at_k, config, problems, output_dir: {
+            "metrics": {"pass@1": 1.0},
+            "results_path": str(sample_path) + "_results.jsonl",
+            "problem_path": str(output_dir / "humaneval_problems.jsonl"),
+            "pass_at_k": list(pass_at_k),
+        },
+    )
+
+    result = evaluate_module.evaluate_loaded_system(
+        system=DummySystem(),
+        config={
+            "training": {"task": "humaneval", "max_seq_len": 32},
+            "evaluation": {"num_samples_per_task": 1, "pass_at_k": [1]},
+        },
+        config_path="dummy-config.yaml",
+        output_dir=tmp_path,
+        checkpoint_path=None,
+        max_samples=1,
+        split="test",
+        max_new_tokens=8,
+        inference_mode="chat_with_prefix",
+        use_terminal_prefix=True,
+        run_baseline=False,
+        do_sample=True,
+        write_agent_logs=True,
+        worker=None,
+        batch_size=1,
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=1,
+        is_dist=False,
+    )
+
+    agent_payload = json.loads((tmp_path / "agent_logs.json").read_text())
+    reader_payload = json.loads((tmp_path / "agent_log" / "reader.json").read_text())
+    solver_payload = json.loads((tmp_path / "agent_log" / "solver.json").read_text())
+
+    assert agent_payload["samples"][0]["question_id"] == "HumanEval/0"
+    assert reader_payload["samples"]["HumanEval/0"]["output"]["generated_text"] == "inspect signature"
+    assert solver_payload["samples"]["HumanEval/0"]["input"]["upstream_texts"] == ["inspect signature"]
+    assert result["paths"]["agent_log_path"].endswith("agent_logs.json")
+    assert result["paths"]["role_agent_log_dir"].endswith("agent_log")
+
+
 def test_evaluate_loaded_system_writes_question_ids_and_role_logs(tmp_path: Path, monkeypatch):
     from src.cli import evaluate as evaluate_module
 
@@ -504,3 +935,90 @@ def test_evaluate_uses_manual_question_and_custom_output_dir(tmp_path: Path, mon
     assert payload["samples"][0]["question"] == "What is 2+2?"
     assert payload["samples"][0]["question_id"].startswith("manual-")
     assert role_payload["samples"][payload["samples"][0]["question_id"]]["output"]["generated_text"] == "4"
+
+
+def test_evaluate_cli_delegates_humaneval_to_loaded_system(tmp_path: Path, monkeypatch):
+    from src.cli import evaluate as evaluate_module
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "load_config",
+        lambda path: {
+            "training": {"task": "humaneval", "max_seq_len": 32},
+            "evaluation": {"num_samples_per_task": 2, "pass_at_k": [1]},
+        },
+    )
+    monkeypatch.setattr(
+        evaluate_module,
+        "setup_eval_distributed",
+        lambda: (torch.device("cpu"), 0, 1, False),
+    )
+    monkeypatch.setattr(evaluate_module, "cleanup_eval_distributed", lambda: None)
+    monkeypatch.setattr(evaluate_module.torch, "load", lambda *args, **kwargs: {
+        "compressor_state": {},
+        "adjacency_state": {},
+        "base_model_state": None,
+    })
+
+    class DummySystem:
+        def __init__(self, config):
+            self.config = config
+            self.base_model = type(
+                "DummyBaseModel",
+                (),
+                {
+                    "tokenizer": type("DummyTokenizer", (), {"pad_token_id": 0, "eos_token_id": 2})(),
+                    "model": type("DummyModel", (), {"load_state_dict": staticmethod(lambda state: None)})(),
+                },
+            )()
+            self.compressor = type("DummyCompressor", (), {"load_state_dict": staticmethod(lambda state: None)})()
+            self.adjacency = type(
+                "DummyAdjacency",
+                (),
+                {
+                    "load_state_dict": staticmethod(lambda state: None),
+                    "get_adjacency": staticmethod(lambda: torch.zeros(1, 1)),
+                    "get_hard_adjacency": staticmethod(lambda: torch.zeros(1, 1)),
+                },
+            )()
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+        def log_adjacency(self):
+            return "Adjacency (1x1):"
+
+    monkeypatch.setattr(evaluate_module, "MultiAgentSystem", DummySystem)
+
+    called = {}
+
+    def fake_evaluate_loaded_system(**kwargs):
+        called["kwargs"] = kwargs
+        return {"task": "humaneval"}
+
+    monkeypatch.setattr(evaluate_module, "evaluate_loaded_system", fake_evaluate_loaded_system)
+
+    evaluate_module.evaluate(
+        config_path="dummy-config.yaml",
+        checkpoint_path="dummy-checkpoint.pt",
+        max_samples=3,
+        split="test",
+        max_new_tokens=64,
+        inference_mode="chat_with_prefix",
+        use_terminal_prefix=True,
+        run_baseline=False,
+        do_sample=True,
+        write_agent_logs=True,
+        worker=2,
+        batch_size=1,
+        question=None,
+        output_dir=tmp_path,
+    )
+
+    assert called["kwargs"]["config"]["training"]["task"] == "humaneval"
+    assert called["kwargs"]["split"] == "test"
+    assert called["kwargs"]["max_new_tokens"] == 64
+    assert called["kwargs"]["output_dir"] == tmp_path

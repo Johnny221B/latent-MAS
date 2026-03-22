@@ -169,6 +169,19 @@ $$
 
 这里 `system_prompt` 不再作为裸文本 token 直接拼在 question 前，而是作为 chat template 中的 system message 参与构造终端输入。
 
+对 `arc_easy` / `arc_challenge` 而言，这里的 `x` 也不是 Hugging Face 原始样本里的裸 `question` 字段，而是 dataset 层提前格式化后的：
+
+```text
+<question>
+
+Choices:
+A. ...
+B. ...
+...
+```
+
+因此 ARC 的选项信息是在 tokenizer 之前就进入 prompt 的，不依赖额外的 runtime prompt 拼接分支。
+
 ### 5.4 终端 agent 的评测输入格式
 
 在评测阶段，终端 agent 使用 `generate_answer()`，输入形式为：
@@ -180,6 +193,16 @@ $$
 此时不再拼接标准答案，而是让模型自回归生成输出文本。
 
 当前评测额外还支持一个 inference-only 消融模式 `chat_with_text`。在这个模式下，通信介质不再是 latent prefix，而是文本消息。非终端 agent 会先生成文本，下游 agent 再把这些上游文本和原问题一起组织成 chat prompt。
+
+对 ARC，这里的“原问题”同样指格式化后的完整题面，也就是包含 `Choices:` 段落的文本。
+
+对于 `humaneval`，这里的“生成答案”应理解为“生成代码 completion”。也就是说：
+
+- 输入仍然是 `prompt`
+- 输出不再被当作自然语言答案抽取
+- completion 会原样写入官方 `samples.jsonl`，供后续 `human_eval` functional correctness 执行
+
+当前仓库没有为 `humaneval` 设计专门的 role prompt 文件；它仍然复用 `configs/roles/*.json` 中同一套角色 prompt，只是终端输出被解释为代码补全而不是答案字符串。
 
 ### 5.5 `legacy_plain_with_prefix`、`chat_with_prefix` 与 `chat_with_text` 的区别
 

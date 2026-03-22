@@ -43,6 +43,7 @@ $$
 - `gsm8k`
 - `arc_easy`
 - `arc_challenge`
+- `humaneval`
 
 这些任务在代码中被统一成相同的数据接口，每条样本最终都被处理为：
 
@@ -54,6 +55,42 @@ $$
 ```
 
 其中，GSM8K 的答案字段会经过额外抽取，只保留 `####` 之后的最终数值答案。这意味着当前训练不是在拟合完整解题过程，而是在拟合最终答案字符串。
+
+`ARC-Easy` 与 `ARC-Challenge` 虽然在统一接口里仍然表现为 `question -> answerKey`，但这里的 `question` 不是原始裸字段。dataset 层会先把原题和候选项渲染成：
+
+```text
+<question>
+
+Choices:
+A. ...
+B. ...
+...
+```
+
+也就是说，当前 ARC 训练和评测都明确包含选项文本；模型学习的是“带选项的题面 -> 最终字母答案”。
+
+`HumanEval` 是当前唯一一个代码生成任务。它在 dataset 层仍被整理成统一接口：
+
+```text
+{
+  "question_id": task_id,
+  "question": prompt,
+  "answer": canonical_solution,
+  "task_id": ...,
+  "prompt": ...,
+  "canonical_solution": ...,
+  "test": ...,
+  "entry_point": ...
+}
+```
+
+其中：
+
+- 训练时使用 `prompt -> canonical_solution`，也就是代码补全监督
+- 评测时不会走字符串 exact-match，而是把生成结果写成官方 `samples.jsonl` 格式，再交给 `human_eval` harness 计算 `pass@k`
+- 由于官方 `HumanEval` 只有一套题，当前仓库把它显式当作本地 `60/40` debug split 使用：`train` 取前 `60%`，`test` 取后 `40%`
+
+这意味着当前仓库里的 `humaneval` 结果主要用于调通 train/eval 链路和做本地对比，不能直接当作完整官方 HumanEval 榜单结果。
 
 ### 2.2 训练批次的输入形式
 
@@ -73,9 +110,21 @@ $$
 
 当前默认实验配置 [gsm8k_5agent.yaml](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
 
+对 ARC 而言，这里的 `question` 已经是“原题 + Choices”拼接后的文本；chat template 不会再单独处理结构化 `choices` 字段。
+
 另外，当前评测路径额外支持 `evaluation.inference_mode = chat_with_text`。这个模式只用于推理期消融，不会改变训练；它的作用是把 agent 间通信从 latent prefix 改成文本消息，以便和原始 latent communication 做对照。
 
 当前 `evaluate.py` 还支持单题手工推理：可直接传入 `--question "..."` 和可选 `--output-dir`。这条路径不会读取评测数据集，而是构造一条临时样本，并复用与批量评测相同的 `eval_results.json`、`agent_logs.json`、`agent_log/<role>.json` 输出格式。
+
+对 `humaneval` 而言，`evaluate.py` 的主路径与上述 answer-matching 任务不同：
+
+- 先按 `evaluation.num_samples_per_task` 对每道题生成多个 completion
+- 写出 `humaneval_samples.jsonl`
+- 写出 `humaneval_problems.jsonl`
+- 调用官方 `human_eval.evaluation.evaluate_functional_correctness`
+- 将返回的 `pass@k` 与路径信息汇总到 `eval_results.json`
+
+若本地没有安装 `human_eval`，或者没有启用其执行 harness，当前实现会直接报错，不会退回字符串匹配。
 
 ## 3. 模型组成
 

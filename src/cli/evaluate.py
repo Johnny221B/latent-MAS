@@ -12,6 +12,7 @@ import argparse
 import copy
 import hashlib
 import json
+import inspect
 import os
 import shutil
 import sys
@@ -97,6 +98,31 @@ def write_eval_snapshot(
         payload["baseline_single_model"] = baseline_single_model
     if comparison is not None:
         payload["comparison"] = comparison
+    eval_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(eval_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def write_humaneval_snapshot(
+    eval_path: Path,
+    method: str,
+    task: str,
+    *,
+    metrics: dict,
+    parameters: dict,
+    world_size: int,
+    samples: list[dict],
+    artifacts: dict,
+) -> None:
+    payload = {
+        "method": method,
+        "task": task,
+        "metrics": metrics,
+        "parameters": parameters,
+        "world_size": world_size,
+        "samples": samples,
+        "artifacts": artifacts,
+    }
     eval_path.parent.mkdir(parents=True, exist_ok=True)
     with open(eval_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -193,6 +219,270 @@ def build_single_question_dataset(question: str) -> list[dict]:
     ]
 
 
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _import_human_eval_evaluation():
+    try:
+        from human_eval.evaluation import evaluate_functional_correctness
+    except ImportError:
+        return None
+    return evaluate_functional_correctness
+
+
+def _evaluate_humaneval_samples(
+    sample_path: Path,
+    *,
+    num_samples_per_task: int,
+    pass_at_k: list[int],
+    config: dict,
+    problems: list[dict],
+    output_dir: Path,
+) -> dict:
+    evaluator = _import_human_eval_evaluation()
+    if evaluator is None:
+        raise RuntimeError(
+            "HumanEval evaluation requires the `human_eval` package. "
+            "Install it and enable its execution harness before running this task."
+        )
+
+    problem_path = output_dir / "humaneval_problems.jsonl"
+    problem_rows = [
+        {
+            "task_id": sample["task_id"],
+            "prompt": sample["prompt"],
+            "canonical_solution": sample["canonical_solution"],
+            "test": sample["test"],
+            "entry_point": sample["entry_point"],
+        }
+        for sample in problems
+    ]
+    _write_jsonl(problem_path, problem_rows)
+
+    eval_kwargs = {}
+    evaluator_signature = inspect.signature(evaluator)
+    if "problem_file" in evaluator_signature.parameters:
+        eval_kwargs["problem_file"] = str(problem_path)
+    elif "problem_file_path" in evaluator_signature.parameters:
+        eval_kwargs["problem_file_path"] = str(problem_path)
+    if "k" in evaluator_signature.parameters:
+        eval_kwargs["k"] = list(pass_at_k)
+    if "n_workers" in evaluator_signature.parameters:
+        eval_kwargs["n_workers"] = int(config.get("evaluation", {}).get("n_workers", 4))
+    if "timeout" in evaluator_signature.parameters:
+        eval_kwargs["timeout"] = float(config.get("evaluation", {}).get("timeout", 3.0))
+
+    result = evaluator(str(sample_path), **eval_kwargs)
+    results_path = Path(f"{sample_path}_results.jsonl")
+    return {
+        "metrics": result if isinstance(result, dict) else {"pass@1": result},
+        "problem_path": str(problem_path),
+        "results_path": str(results_path),
+        "pass_at_k": list(pass_at_k),
+    }
+
+
+def _evaluate_loaded_system_humaneval(
+    system,
+    config: dict,
+    *,
+    config_path: str,
+    output_dir: Path,
+    checkpoint_path: str | None,
+    max_samples: int | None,
+    split: str,
+    max_new_tokens: int,
+    inference_mode: str,
+    use_terminal_prefix: bool,
+    do_sample: bool,
+    write_agent_logs: bool,
+    worker: int | None,
+    batch_size: int,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    is_dist: bool,
+):
+    evaluation_cfg = config.get("evaluation", {})
+    num_samples_per_task = int(evaluation_cfg.get("num_samples_per_task", 1))
+    pass_at_k = list(evaluation_cfg.get("pass_at_k", [1]))
+    split_scheme = evaluation_cfg.get("split_scheme", "debug_60_40")
+
+    if max_samples is not None and max_samples < 0:
+        max_samples = None
+
+    if is_main_process(rank):
+        print("\nRunning HumanEval evaluation...")
+
+    full_dataset = create_dataset(task="humaneval", split=split, max_samples=max_samples)
+    base_problems = [full_dataset[idx] for idx in range(len(full_dataset))]
+    repeated_samples: list[dict] = []
+    for sample in base_problems:
+        repeated_samples.extend([sample] * num_samples_per_task)
+
+    repeated_dataset = shard_dataset(repeated_samples, rank, world_size)
+    dataloader = DataLoader(repeated_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
+    sample_rows: list[dict] = []
+    agent_log_rows: list[dict] = []
+    t_start = time.time()
+
+    with torch.no_grad():
+        for batch in dataloader:
+            tokenized = system.base_model.tokenize(
+                batch["questions"],
+                max_length=config["training"].get("max_seq_len", 2048),
+            )
+            task_ids = tokenized["input_ids"].to(device)
+            task_mask = tokenized["attention_mask"].to(device)
+
+            output = system(
+                task_token_ids=task_ids,
+                task_attention_mask=task_mask,
+                max_new_tokens=max_new_tokens,
+                inference_mode=inference_mode,
+                use_terminal_prefix=use_terminal_prefix,
+                do_sample=do_sample,
+                collect_agent_logs=write_agent_logs,
+            )
+
+            generated_text = output["generated_text"]
+            generation = output.get("generation", {})
+            agent_logs = output.get("agent_logs", [])
+            batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
+            batch_question_ids = batch["question_ids"]
+            batch_questions = batch["questions"]
+            batch_answers = batch["answers"]
+            batch_size_actual = len(batch_questions)
+            for sample_idx in range(batch_size_actual):
+                sample_generation = {
+                    key: _select_batch_item(value, sample_idx)
+                    for key, value in generation.items()
+                }
+                sample_rows.append(
+                    {
+                        "task_id": str(batch_question_ids[sample_idx]),
+                        "completion": batch_generated_text[sample_idx],
+                        "question": batch_questions[sample_idx],
+                    }
+                )
+                if write_agent_logs:
+                    agent_log_rows.append(
+                        build_agent_sample_log(
+                            question_id=batch_question_ids[sample_idx],
+                            question=batch_questions[sample_idx],
+                            gold=batch_answers[sample_idx],
+                            prediction=batch_generated_text[sample_idx],
+                            generation=sample_generation,
+                            correct=False,
+                            agent_logs=agent_logs,
+                        )
+                    )
+
+    gathered_rows = gather_sharded_objects(sample_rows, rank, world_size)
+    gathered_agent_logs = gather_sharded_objects(agent_log_rows, rank, world_size)
+    all_rows = [row for shard_rows in gathered_rows for row in (shard_rows or [])]
+    all_agent_log_rows = [
+        row for shard_rows in gathered_agent_logs for row in (shard_rows or [])
+    ]
+
+    if not is_main_process(rank):
+        if is_dist:
+            dist.barrier()
+            cleanup_eval_distributed()
+        return None
+
+    samples_path = output_dir / "humaneval_samples.jsonl"
+    _write_jsonl(
+        samples_path,
+        [{"task_id": row["task_id"], "completion": row["completion"]} for row in all_rows],
+    )
+
+    harness_result = _evaluate_humaneval_samples(
+        samples_path,
+        num_samples_per_task=num_samples_per_task,
+        pass_at_k=pass_at_k,
+        config=config,
+        problems=base_problems,
+        output_dir=output_dir,
+    )
+
+    eval_path = output_dir / "eval_results.json"
+    agent_log_path = output_dir / "agent_logs.json"
+    role_agent_log_dir = output_dir / "agent_log"
+    metrics = {
+        **harness_result["metrics"],
+        "time_seconds": time.time() - t_start,
+        "num_tasks": len(base_problems),
+        "num_samples_per_task": num_samples_per_task,
+        "total_samples": len(all_rows),
+        "pass_at_k": pass_at_k,
+        "split_scheme": split_scheme,
+    }
+    parameters = {
+        "config_path": config_path,
+        "checkpoint_path": checkpoint_path,
+        "split": split,
+        "max_samples": max_samples,
+        "generation_max_new_tokens": max_new_tokens,
+        "inference_mode": inference_mode,
+        "use_terminal_prefix": use_terminal_prefix,
+        "do_sample": do_sample,
+        "write_agent_logs": write_agent_logs,
+        "worker": worker,
+        "batch_size": batch_size,
+        "split_scheme": split_scheme,
+        "config": copy.deepcopy(config),
+    }
+    artifacts = {
+        "eval_path": str(eval_path),
+        "samples_path": str(samples_path),
+        "problem_path": harness_result["problem_path"],
+        "results_path": harness_result["results_path"],
+    }
+    write_humaneval_snapshot(
+        eval_path=eval_path,
+        method="ours_trained_multi_agent",
+        task="humaneval",
+        metrics=metrics,
+        parameters=parameters,
+        world_size=world_size,
+        samples=all_rows,
+        artifacts=artifacts,
+    )
+    if write_agent_logs:
+        write_agent_log_snapshot(
+            agent_log_path=agent_log_path,
+            method="ours_trained_multi_agent",
+            task="humaneval",
+            parameters=parameters,
+            samples=all_agent_log_rows,
+        )
+        write_role_agent_log_snapshots(role_agent_log_dir, all_agent_log_rows)
+
+    result_payload = {
+        "method": "ours_trained_multi_agent",
+        "task": "humaneval",
+        "metrics": metrics,
+        "paths": {
+            **artifacts,
+            "agent_log_path": str(agent_log_path) if write_agent_logs else None,
+            "role_agent_log_dir": str(role_agent_log_dir) if write_agent_logs else None,
+        },
+    }
+    print(f"  HumanEval samples saved: {samples_path}")
+    print(f"  HumanEval results saved: {harness_result['results_path']}")
+
+    if is_dist:
+        dist.barrier()
+    cleanup_eval_distributed()
+    return result_payload
+
+
 def setup_eval_distributed() -> tuple[torch.device, int, int, bool]:
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
@@ -278,6 +568,27 @@ def evaluate_loaded_system(
             print(system.adjacency.get_hard_adjacency())
 
     task = config["training"]["task"]
+    if task == "humaneval":
+        return _evaluate_loaded_system_humaneval(
+            system=system,
+            config=config,
+            config_path=config_path,
+            output_dir=output_dir,
+            checkpoint_path=checkpoint_path,
+            max_samples=max_samples,
+            split=split,
+            max_new_tokens=generation_max_new_tokens,
+            inference_mode=inference_mode,
+            use_terminal_prefix=use_terminal_prefix,
+            do_sample=do_sample,
+            write_agent_logs=write_agent_logs,
+            worker=worker,
+            batch_size=batch_size,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+            is_dist=is_dist,
+        )
     if max_samples is not None and max_samples < 0:
         max_samples = None
     if is_main_process(rank):
@@ -575,6 +886,29 @@ def evaluate(
 
     # ── Dataset ──
     task = config["training"]["task"]
+    checkpoint_dir = Path(output_dir) if output_dir is not None else Path(checkpoint_path).parent
+    if question is None and task == "humaneval":
+        return evaluate_loaded_system(
+            system=system,
+            config=config,
+            config_path=config_path,
+            output_dir=checkpoint_dir,
+            checkpoint_path=checkpoint_path,
+            max_samples=max_samples,
+            split=split,
+            max_new_tokens=generation_max_new_tokens,
+            inference_mode=inference_mode,
+            use_terminal_prefix=use_terminal_prefix,
+            run_baseline=run_baseline,
+            do_sample=do_sample,
+            write_agent_logs=write_agent_logs,
+            worker=worker,
+            batch_size=batch_size,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+            is_dist=is_dist,
+        )
     if max_samples is not None and max_samples < 0:
         max_samples = None
     if question is not None:
@@ -600,7 +934,6 @@ def evaluate(
     agent_log_results = []
     sample_durations = []
     generated_token_counts = []
-    checkpoint_dir = Path(output_dir) if output_dir is not None else Path(checkpoint_path).parent
     eval_stem = "eval_results" if split == "test" else f"eval_results_{split}"
     agent_log_stem = "agent_logs" if split == "test" else f"agent_logs_{split}"
     eval_path = checkpoint_dir / f"{eval_stem}.json"

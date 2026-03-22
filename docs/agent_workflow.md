@@ -39,11 +39,16 @@ flowchart TD
     V --> W[Add Graph Loss]
     W --> X[Backprop to Compressor and Adjacency]
 
-    T -->|Evaluation| Y[generate_answer]
+    T -->|Evaluation: answer tasks| Y[generate_answer]
     Y --> Z[Decode Generated Text]
     Z --> AA[Extract Final Prediction]
     AA --> AB[Write eval_results.json]
     AA --> AC[Write agent_logs.json]
+
+    T -->|Evaluation: HumanEval| AD[generate multiple code completions]
+    AD --> AE[Write humaneval_samples.jsonl]
+    AE --> AF[Run official functional correctness harness]
+    AF --> AG[Write pass@k summary to eval_results.json]
 ```
 
 ## 2. Non-Terminal Agent Workflow
@@ -115,7 +120,7 @@ flowchart LR
 
 ## 5. Eval Logging Workflow
 
-当前 `ours eval` 在每条样本完成后，会把结果写入两个 JSON 文件。
+当前 `ours eval` 的 logging workflow 需要区分两类任务。
 
 ```mermaid
 flowchart TD
@@ -131,6 +136,14 @@ flowchart TD
 
 - `eval_results.json`
 - `agent_logs.json`
+
+对于 `humaneval`，主产物会额外变成：
+
+- `humaneval_samples.jsonl`
+- `humaneval_problems.jsonl`
+- `<samples>.jsonl_results.jsonl`
+
+这条路径的主指标是 `pass@k`，不是逐题 exact-match。
 
 你也可以配合这两份文档一起看：
 
