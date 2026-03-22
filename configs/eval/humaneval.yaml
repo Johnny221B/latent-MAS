@@ -1,0 +1,10 @@
+task: humaneval
+split: test
+max_new_tokens: 512
+max_samples: -1
+inference_mode: chat_with_prefix
+use_terminal_prefix: true
+do_sample: true
+write_agent_logs: true
+batch_size: 1
+worker: 2

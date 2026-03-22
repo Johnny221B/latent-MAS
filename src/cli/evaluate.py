@@ -18,6 +18,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+import yaml
 
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
@@ -32,6 +33,45 @@ from src.utils.answer_extraction import extract_answer
 from src.pipeline.multi_agent_system import MultiAgentSystem
 from src.data import create_dataset
 from src.models.agent import Agent
+
+
+def merge_eval_config(base_config_path: str | Path, eval_config_path: str | Path | None) -> dict:
+    config = load_config(base_config_path)
+    if eval_config_path is None:
+        return config
+
+    eval_payload = yaml.safe_load(Path(eval_config_path).read_text(encoding="utf-8")) or {}
+    eval_task = eval_payload.get("task")
+    if eval_task:
+        config.setdefault("training", {})["task"] = eval_task
+
+    evaluation_cfg = config.setdefault("evaluation", {})
+    for key, value in eval_payload.items():
+        if key == "task":
+            continue
+        evaluation_cfg[key] = value
+    return config
+
+
+def persist_eval_configs(
+    *,
+    output_dir: str | Path,
+    eval_config_path: str | Path | None,
+) -> dict[str, str | None]:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    written_eval_config_path = None
+    if eval_config_path is not None:
+        written_eval_config_path = output_dir / "eval_config.yaml"
+        written_eval_config_path.write_text(
+            Path(eval_config_path).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    return {
+        "eval_config_path": str(written_eval_config_path) if written_eval_config_path is not None else None,
+    }
 
 
 def build_agent_sample_log(
@@ -726,7 +766,6 @@ def evaluate_loaded_system(
                         "correct": shard_update["correct"],
                     }
                     if write_agent_logs and shard_update["agent_log"] is not None:
-                        sample_result["agent_log"] = shard_update["agent_log"]
                         agent_log_results.append(shard_update["agent_log"])
                     results.append(sample_result)
 
@@ -835,20 +874,36 @@ def evaluate(
     config_path: str,
     checkpoint_path: str,
     max_samples: int | None = None,
-    split: str = "test",
-    max_new_tokens: int = 2048,
-    inference_mode: str = "chat_with_prefix",
-    use_terminal_prefix: bool = True,
+    split: str | None = None,
+    max_new_tokens: int | None = None,
+    inference_mode: str | None = None,
+    use_terminal_prefix: bool | None = None,
     run_baseline: bool = False,
-    do_sample: bool = False,
-    write_agent_logs: bool = True,
+    do_sample: bool | None = None,
+    write_agent_logs: bool | None = None,
     worker: int | None = None,
-    batch_size: int = 1,
+    batch_size: int | None = None,
     question: str | None = None,
     output_dir: str | Path | None = None,
+    eval_config_path: str | None = None,
 ):
-    config = load_config(config_path)
-    generation_max_new_tokens = max_new_tokens
+    config = merge_eval_config(config_path, eval_config_path)
+    evaluation_cfg = config.get("evaluation", {})
+    split = split or evaluation_cfg.get("split", "test")
+    generation_max_new_tokens = max_new_tokens or evaluation_cfg.get("max_new_tokens", 2048)
+    inference_mode = inference_mode or evaluation_cfg.get("inference_mode", "chat_with_prefix")
+    if use_terminal_prefix is None:
+        use_terminal_prefix = bool(evaluation_cfg.get("use_terminal_prefix", True))
+    if do_sample is None:
+        do_sample = bool(evaluation_cfg.get("do_sample", False))
+    if write_agent_logs is None:
+        write_agent_logs = bool(evaluation_cfg.get("write_agent_logs", True))
+    if worker is None:
+        worker = evaluation_cfg.get("worker")
+    if batch_size is None:
+        batch_size = int(evaluation_cfg.get("batch_size", 1))
+    if max_samples is None:
+        max_samples = evaluation_cfg.get("max_samples")
     device, rank, world_size, is_dist = setup_eval_distributed()
     if is_main_process(rank):
         print(f"Device: {device}")
@@ -892,6 +947,10 @@ def evaluate(
     # ── Dataset ──
     task = config["training"]["task"]
     checkpoint_dir = Path(output_dir) if output_dir is not None else Path(checkpoint_path).parent
+    persisted_config_paths = persist_eval_configs(
+        output_dir=checkpoint_dir,
+        eval_config_path=eval_config_path,
+    )
     if question is None and task == "humaneval":
         return evaluate_loaded_system(
             system=system,
@@ -1058,7 +1117,6 @@ def evaluate(
                         "correct": shard_update["correct"],
                     }
                     if write_agent_logs and shard_update["agent_log"] is not None:
-                        sample_result["agent_log"] = shard_update["agent_log"]
                         agent_log_results.append(shard_update["agent_log"])
                     results.append(sample_result)
 
@@ -1079,6 +1137,7 @@ def evaluate(
                 parameters={
                     "config_path": config_path,
                     "checkpoint_path": checkpoint_path,
+                    "eval_config_path": persisted_config_paths["eval_config_path"],
                     "split": split,
                     "max_samples": max_samples,
                     "question": question,
@@ -1102,6 +1161,7 @@ def evaluate(
                     parameters={
                         "config_path": config_path,
                         "checkpoint_path": checkpoint_path,
+                        "eval_config_path": persisted_config_paths["eval_config_path"],
                         "split": split,
                         "max_samples": max_samples,
                         "generation_max_new_tokens": generation_max_new_tokens,
@@ -1132,8 +1192,7 @@ def evaluate(
     if not is_main_process(rank):
         if is_dist:
             dist.barrier()
-            if cleanup_distributed:
-                cleanup_eval_distributed()
+            cleanup_eval_distributed()
         return
 
     # ── Summary ──
@@ -1176,6 +1235,7 @@ def evaluate(
         parameters={
             "config_path": config_path,
             "checkpoint_path": checkpoint_path,
+            "eval_config_path": persisted_config_paths["eval_config_path"],
             "split": split,
             "max_samples": max_samples,
             "question": question,
@@ -1199,7 +1259,7 @@ def evaluate(
     if not run_baseline:
         if is_dist:
             dist.barrier()
-        if cleanup_distributed:
+        if is_dist:
             cleanup_eval_distributed()
         return
 
@@ -1389,15 +1449,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--eval-config", type=str, default=None)
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--split", type=str, default="test", choices=["train", "test"])
-    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--split", type=str, default=None, choices=["train", "test"])
+    parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--question", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument(
         "--inference-mode",
         type=str,
-        default="chat_with_prefix",
+        default=None,
         choices=["chat_with_prefix", "legacy_plain_with_prefix", "chat_with_text"],
     )
     parser.add_argument(
@@ -1413,7 +1474,7 @@ if __name__ == "__main__":
     parser.add_argument("--do-sample", action="store_true")
     parser.add_argument("--no-agent-logs", action="store_true")
     parser.add_argument("--worker", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=None)
     args = parser.parse_args()
     evaluate(
         args.config,
@@ -1422,12 +1483,13 @@ if __name__ == "__main__":
         args.split,
         args.max_new_tokens,
         inference_mode=args.inference_mode,
-        use_terminal_prefix=not args.no_terminal_prefix,
+        use_terminal_prefix=(False if args.no_terminal_prefix else None),
         run_baseline=args.run_baseline,
-        do_sample=args.do_sample,
-        write_agent_logs=not args.no_agent_logs,
+        do_sample=(True if args.do_sample else None),
+        write_agent_logs=(False if args.no_agent_logs else None),
         worker=args.worker,
         batch_size=args.batch_size,
         question=args.question,
         output_dir=args.output_dir,
+        eval_config_path=args.eval_config,
     )

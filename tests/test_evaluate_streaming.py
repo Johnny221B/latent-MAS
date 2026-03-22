@@ -4,8 +4,57 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+def test_merge_eval_config_overrides_task_and_evaluation_fields(tmp_path: Path):
+    from src.cli.evaluate import merge_eval_config
+
+    base_config_path = tmp_path / "train_config.yaml"
+    eval_config_path = tmp_path / "eval_config.yaml"
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "agents": ["planner", "solver", "critic"],
+                "adjacency_prior": [[0, 1, 0], [0, 0, 1], [0, 0, 0]],
+                "execution_order": [0, 1, 2],
+                "terminal_agent_index": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    base_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"name": "dummy"},
+                "graph": {"config": str(graph_path)},
+                "training": {"task": "competition_math", "batch_size": 2},
+                "evaluation": {"split": "train", "max_new_tokens": 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    eval_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "task": "gsm8k",
+                "split": "test",
+                "max_new_tokens": 128,
+                "batch_size": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    merged = merge_eval_config(base_config_path, eval_config_path)
+
+    assert merged["training"]["task"] == "gsm8k"
+    assert merged["evaluation"]["split"] == "test"
+    assert merged["evaluation"]["max_new_tokens"] == 128
+    assert merged["evaluation"]["batch_size"] == 1
 
 
 def test_streaming_eval_writes_single_refreshing_json(tmp_path: Path):
@@ -796,6 +845,7 @@ def test_evaluate_loaded_system_writes_question_ids_and_role_logs(tmp_path: Path
     solver_role_payload = json.loads((tmp_path / "agent_log" / "solver.json").read_text())
 
     assert eval_payload["samples"][0]["question_id"] == "gsm8k-test-7"
+    assert "agent_log" not in eval_payload["samples"][0]
     assert agent_payload["samples"][0]["question_id"] == "gsm8k-test-7"
     assert reader_role_payload["samples"]["gsm8k-test-7"]["output"]["generated_text"] == "reader output"
     assert solver_role_payload["samples"]["gsm8k-test-7"]["input"]["upstream_texts"] == ["reader output"]

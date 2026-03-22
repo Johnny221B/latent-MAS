@@ -178,6 +178,7 @@ outputs/gsm8k_qwen3-8b_xxx/
 {
   "config_path": "outputs/.../config.yaml",
   "checkpoint_path": "outputs/.../final_model.pt",
+  "eval_config_path": "outputs/.../gsm8k/eval_config.yaml",
   "split": "test",
   "max_samples": 100,
   "question": null,
@@ -198,6 +199,9 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 - `checkpoint_path`
   当前使用的 checkpoint 路径。
+
+- `eval_config_path`
+  当前评测使用的原始 eval 配置副本路径。若本次没有提供单独的 eval config，则为 `null`。
 
 - `max_samples`
   本次评测最多使用多少条样本。`-1` 或 `null` 一般表示全量。
@@ -240,8 +244,7 @@ outputs/gsm8k_qwen3-8b_xxx/
   "gold": "18",
   "prediction": "9",
   "generation": { ... },
-  "correct": false,
-  "agent_log": { ... }
+  "correct": false
 }
 ```
 
@@ -265,8 +268,7 @@ outputs/gsm8k_qwen3-8b_xxx/
 - `correct`
   当前样本是否答对。
 
-- `agent_log`
-  当前样本对应的 agent 级结构化日志。这个字段与 `agent_logs.json` 中的对应样本信息基本一致。
+`eval_results.json` 不再内嵌 agent 级结构化日志；若启用 `write_agent_logs`，这些内容会单独写入 `agent_logs.json` 与 `agent_log/<role>.json`。
 
 ### `samples[*].generation` 字段
 

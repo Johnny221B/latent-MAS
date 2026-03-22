@@ -232,3 +232,18 @@ def test_competition_math_dataset_extracts_boxed_answer(monkeypatch):
     assert sample["answer"] == "42"
     assert sample["level"] == "Level 1"
     assert sample["type"] == "algebra"
+
+
+def test_dataset_falls_back_to_stable_question_id_when_missing_field():
+    dataset = MultiAgentDataset.__new__(MultiAgentDataset)
+    dataset.data = [{"question": "What is 1+1?", "answer": "2"}]
+    dataset.question_field = "question"
+    dataset.answer_field = "answer"
+    dataset.answer_extractor = None
+    dataset.question_id_field = "id"
+    dataset.extra_fields = ()
+
+    sample = dataset[0]
+
+    assert sample["question_id"].startswith("sample-")
+    assert sample["answer"] == "2"

@@ -114,6 +114,8 @@ B. ...
 - `questions: list[str]`
 - `answers: list[str]`
 
+训练 dataloader 默认会对训练集做 shuffle。当前语义是 `training.shuffle = true` 为默认值；只有在实验配置中显式设成 `false` 时，训练样本顺序才会保持固定。单卡路径和 DDP 路径都遵循这个开关。
+
 然后，这两部分文本会分别被 tokenizer 编码为：
 
 - 问题 token：`task_token_ids`
@@ -131,7 +133,7 @@ B. ...
 
 另外，当前评测路径额外支持 `evaluation.inference_mode = chat_with_text`。这个模式只用于推理期消融，不会改变训练；它的作用是把 agent 间通信从 latent prefix 改成文本消息，以便和原始 latent communication 做对照。
 
-当前 `evaluate.py` 还支持单题手工推理：可直接传入 `--question "..."` 和可选 `--output-dir`。这条路径不会读取评测数据集，而是构造一条临时样本，并复用与批量评测相同的 `eval_results.json`、`agent_logs.json`、`agent_log/<role>.json` 输出格式。
+当前 `evaluate.py` 还支持单题手工推理：可直接传入 `--question "..."` 和可选 `--output-dir`。这条路径不会读取评测数据集，而是构造一条临时样本，并复用与批量评测相同的 `eval_results.json`、`agent_logs.json`、`agent_log/<role>.json` 输出文件组织。当前 `eval_results.json` 只保存逐样本预测结果，不再内嵌 agent 级日志；agent 细节单独落到 `agent_logs.json` 与 `agent_log/<role>.json`。
 
 对 `humaneval` 而言，`evaluate.py` 的主路径与上述 answer-matching 任务不同：
 

@@ -62,6 +62,7 @@ def _normalize_config(config: dict) -> None:
     training_cfg["train_strategy"] = train_strategy
     training_cfg["train_base_model"] = train_strategy == "full_finetune"
     training_cfg.setdefault("save_final_checkpoint", True)
+    training_cfg.setdefault("shuffle", True)
 
     evaluation_cfg = config.setdefault("evaluation", {})
     evaluation_cfg.setdefault("run_after_train", False)

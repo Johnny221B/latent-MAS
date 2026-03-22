@@ -1,5 +1,7 @@
 """Shared dataset wrapper and label helpers."""
 
+import hashlib
+
 import torch
 from torch.utils.data import Dataset
 
@@ -52,7 +54,7 @@ class MultiAgentDataset(Dataset):
             question = question_formatter(item)
         else:
             question = item[self.question_field]
-        question_id = item[self.question_id_field]
+        question_id = self._resolve_question_id(item, question, idx)
 
         raw_answer = item[self.answer_field]
         if self.answer_extractor is not None:
@@ -70,6 +72,15 @@ class MultiAgentDataset(Dataset):
                 if field in item
             },
         }
+
+    def _resolve_question_id(self, item: dict, question: str, idx: int) -> str:
+        question_id_field = getattr(self, "question_id_field", None)
+        if question_id_field and question_id_field in item:
+            return str(item[question_id_field])
+
+        stable_key = f"{self.__class__.__name__}:{idx}:{question}".encode("utf-8")
+        digest = hashlib.sha1(stable_key).hexdigest()[:12]
+        return f"sample-{digest}"
 
 
 def build_labels(

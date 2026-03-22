@@ -335,6 +335,7 @@ def train(config_path: str, max_samples: int | None = None):
             seed=int(probe_cfg.get("seed", 42)),
         )
     drop_last = training_cfg.get("drop_last", True)
+    train_shuffle = bool(training_cfg.get("shuffle", True))
     validate_min_samples_for_batches(
         dataset_size=len(dataset),
         per_gpu_batch_size=training_cfg["batch_size"],
@@ -343,11 +344,11 @@ def train(config_path: str, max_samples: int | None = None):
     )
 
     # DistributedSampler splits data across GPUs
-    sampler = DistributedSampler(dataset, shuffle=True) if is_ddp else None
+    sampler = DistributedSampler(dataset, shuffle=train_shuffle) if is_ddp else None
     dataloader = DataLoader(
         dataset,
         batch_size=training_cfg["batch_size"],  # per-GPU batch size
-        shuffle=(sampler is None),
+        shuffle=train_shuffle if sampler is None else False,
         sampler=sampler,
         collate_fn=collate_fn,
         drop_last=drop_last,

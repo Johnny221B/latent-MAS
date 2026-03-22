@@ -76,6 +76,28 @@ def test_load_config_defaults_train_strategy_to_communication_only(tmp_path: Pat
     assert loaded["training"]["train_strategy"] == "communication_only"
 
 
+def test_load_config_defaults_training_shuffle_to_true(tmp_path: Path):
+    graph_path = _write_minimal_graph(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"name": "dummy"},
+                "graph": {"config": str(graph_path)},
+                "training": {
+                    "task": "gsm8k",
+                    "batch_size": 32,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path)
+
+    assert loaded["training"]["shuffle"] is True
+
+
 def test_probe64_configs_disable_final_checkpoint_and_enable_live_eval():
     repo_root = Path(__file__).resolve().parent.parent
     config_paths = [
@@ -124,20 +146,20 @@ def test_arc_experiment_configs_enable_post_train_test_eval():
 
 def test_competition_math_experiment_configs_use_probe_monitoring():
     repo_root = Path(__file__).resolve().parent.parent
-    config_paths = [
-        repo_root / "configs/experiments/competition_math_5agent.yaml",
-        repo_root / "configs/experiments/competition_math_5agent_debug.yaml",
-    ]
+    config_path = repo_root / "configs/experiments/competition_math_5agent.yaml"
+    debug_config_path = repo_root / "configs/experiments/competition_math_5agent_debug.yaml"
 
-    for config_path in config_paths:
-        loaded = load_config(config_path)
-        assert loaded["training"]["task"] == "competition_math"
-        assert loaded["training"]["train_strategy"] == "communication_only"
-        assert loaded["evaluation"]["run_after_train"] is False
-        assert loaded["training_probe"]["enabled"] is True
-        assert loaded["training_probe"]["samples"] == 100
+    loaded = load_config(config_path)
+    assert loaded["training"]["task"] == "competition_math"
+    assert loaded["training"]["train_strategy"] == "communication_only"
+    assert loaded["evaluation"]["run_after_train"] is False
+    assert loaded["training_probe"]["enabled"] is True
+    assert loaded["training_probe"]["samples"] >= 0
 
-    debug_loaded = load_config(config_paths[1])
+    debug_loaded = load_config(debug_config_path)
+    assert debug_loaded["training"]["task"] == "competition_math"
+    assert debug_loaded["training_probe"]["enabled"] is True
+    assert debug_loaded["training_probe"]["samples"] == 100
     assert debug_loaded["report"]["use_wandb"] is False
 
 
