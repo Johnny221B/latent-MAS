@@ -69,9 +69,9 @@ flowchart LR
 
 对应代码位置：
 
-- [multi_agent_system.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/pipeline/multi_agent_system.py)
-- [dag_executor.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/graph/dag_executor.py)
-- [agent.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/agent.py)
+- [multi_agent_system.py](../src/pipeline/multi_agent_system.py)
+- [dag_executor.py](../src/graph/dag_executor.py)
+- [agent.py](../src/models/agent.py)
 
 ## 3. Terminal Agent Workflow
 
@@ -147,8 +147,8 @@ flowchart TD
 
 你也可以配合这两份文档一起看：
 
-- [prompt_flow.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/prompt_flow.md)
-- [ours_json_log_format.md](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/docs/ours_json_log_format.md)
+- [prompt_flow.md](prompt_flow.md)
+- [ours_json_log_format.md](ours_json_log_format.md)
 
 ## 6. 为什么当前 Eval 会慢
 

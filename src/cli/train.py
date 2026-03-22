@@ -39,7 +39,7 @@ from src.utils.training import (
 )
 from src.pipeline.multi_agent_system import MultiAgentSystem
 from src.cli.evaluate import evaluate_loaded_system
-from data.dataset import create_dataset
+from src.data import create_dataset
 
 
 def collate_fn(batch: list[dict]) -> dict:
@@ -414,6 +414,7 @@ def train(config_path: str, max_samples: int | None = None):
             "rank": rank,
             "world_size": world_size,
             "is_dist": is_ddp,
+            "cleanup_distributed": False,
         }
         for split_name, sample_limit in resolve_post_train_eval_plan(evaluation_cfg):
             if is_main_process():

@@ -5,7 +5,7 @@
 - Hugging Face dataset: `openai/gsm8k`
 - subset: `main`
 
-代码注册位置见 [dataset.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/data/dataset.py) 中的 `TASK_CONFIGS["gsm8k"]`。
+代码注册位置见 [gsm8k.py](../../src/data/gsm8k.py) 与 [factory.py](../../src/data/factory.py)。
 
 ## Installation
 

@@ -183,7 +183,7 @@ class MultiAgentSystem(nn.Module):
 
             # Build labels: [-100, ..., -100, answer_tokens]
             #               |-- question --|--- answer ---|
-            from data.dataset import build_labels
+            from src.data import build_labels
             labels = build_labels(
                 question_len=question_len,
                 answer_ids=answer_ids,

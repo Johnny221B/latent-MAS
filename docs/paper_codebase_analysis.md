@@ -6,7 +6,7 @@
 
 当前分析主要基于：
 
-- 本地论文文件：[paper.pdf](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/doc/paper.pdf)
+- 本地论文文件：[paper.pdf](paper.pdf)
 - arXiv 摘要页面
 - 当前仓库核心实现文件
 
@@ -65,7 +65,7 @@ an end-to-end training-free framework
 
 从当前代码来看，这个仓库确实是沿着 paper 的 latent collaboration 路线在做，但已经不是 paper 摘要描述里那个“纯 training-free”的版本。
 
-当前系统的顶层入口是 [multi_agent_system.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/pipeline/multi_agent_system.py)。
+当前系统的顶层入口是 [multi_agent_system.py](../src/pipeline/multi_agent_system.py)。
 
 它把整个系统拆成几部分：
 
@@ -86,7 +86,7 @@ an end-to-end training-free framework
 
 ### 4.1 BaseModelWrapper
 
-文件：[base_model.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/base_model.py)
+文件：[base_model.py](../src/models/base_model.py)
 
 它负责：
 
@@ -113,7 +113,7 @@ an end-to-end training-free framework
 
 ### 4.2 Agent
 
-文件：[agent.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/agent.py)
+文件：[agent.py](../src/models/agent.py)
 
 Agent 本身不拥有独立模型权重，它只是：
 
@@ -145,7 +145,7 @@ Agent 本身不拥有独立模型权重，它只是：
 
 ### 4.3 LatentCompressor
 
-文件：[compressor.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/compressor.py)
+文件：[compressor.py](../src/models/compressor.py)
 
 这个模块负责把非终端 agent 产生的变长 hidden trajectory，压缩成固定长度 prefix。
 
@@ -165,7 +165,7 @@ Agent 本身不拥有独立模型权重，它只是：
 
 ### 4.4 LearnableAdjacency
 
-文件：[adjacency.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/graph/adjacency.py)
+文件：[adjacency.py](../src/graph/adjacency.py)
 
 这个模块把 agent 图结构做成了可学习的 soft adjacency matrix。
 
@@ -179,7 +179,7 @@ Agent 本身不拥有独立模型权重，它只是：
 
 ### 4.5 MessageAggregator
 
-文件：[aggregator.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/communication/aggregator.py)
+文件：[aggregator.py](../src/communication/aggregator.py)
 
 这个模块做的事很直接：
 
@@ -190,7 +190,7 @@ Agent 本身不拥有独立模型权重，它只是：
 
 ### 4.6 DAGExecutor
 
-文件：[dag_executor.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/graph/dag_executor.py)
+文件：[dag_executor.py](../src/graph/dag_executor.py)
 
 它是执行器，按拓扑顺序依次运行 agent：
 

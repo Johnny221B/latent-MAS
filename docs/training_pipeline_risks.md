@@ -18,7 +18,7 @@
 
 ### 2.1 问题位置
 
-文件：[aggregator.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/communication/aggregator.py)
+文件：[aggregator.py](../src/communication/aggregator.py)
 
 当前消息聚合公式是：
 
@@ -65,7 +65,7 @@ $$
 
 ### 3.1 问题位置
 
-文件：[base_model.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/base_model.py)
+文件：[base_model.py](../src/models/base_model.py)
 
 当前加载模型时写死了：
 
@@ -97,7 +97,7 @@ torch_dtype=torch.float32
 
 ### 4.1 问题位置
 
-文件：[agent.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/agent.py)
+文件：[agent.py](../src/models/agent.py)
 
 当前初始化里有两次赋值：
 
@@ -128,8 +128,8 @@ self.reasoning_steps = role_config.get("reasoning_steps", 256)
 
 文件：
 
-- [multi_train.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/multi_train.py)
-- [train.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/train.py)
+- [multi_train.py](../scripts/multi_train.py)
+- [train.py](../scripts/train.py)
 
 当前答案 tokenization 使用：
 

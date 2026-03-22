@@ -7,7 +7,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.dataset import MultiAgentDataset
+from src.data import MultiAgentDataset
+from src.data import get_task_configs
+
+
+def test_dataset_factory_registry_contains_supported_tasks():
+    task_configs = get_task_configs()
+
+    assert {"gsm8k", "arc_easy", "arc_challenge", "humaneval"} <= set(task_configs)
 
 
 def test_dataset_returns_question_id_from_raw_record():
@@ -32,7 +39,7 @@ def test_dataset_returns_question_id_from_raw_record():
 
 
 def test_format_arc_question_renders_labeled_choices():
-    from data import dataset as dataset_module
+    from src.data import arc as dataset_module
 
     formatted = dataset_module._format_arc_question(
         {
@@ -55,7 +62,7 @@ def test_format_arc_question_renders_labeled_choices():
 
 
 def test_arc_dataset_formats_question_with_choices(monkeypatch):
-    from data import dataset as dataset_module
+    from src.data import arc as dataset_module
 
     raw_rows = [
         {
@@ -90,7 +97,7 @@ def test_arc_dataset_formats_question_with_choices(monkeypatch):
 
     monkeypatch.setattr(dataset_module, "_load_hf_dataset", fake_load_dataset)
 
-    dataset = dataset_module.MultiAgentDataset(task="arc_easy", split="train")
+    dataset = MultiAgentDataset(task="arc_easy", split="train")
     sample = dataset[0]
 
     assert sample["question_id"] == "arc-easy-train-1"
@@ -129,7 +136,7 @@ def test_humaneval_dataset_preserves_code_metadata():
 
 
 def test_humaneval_dataset_uses_deterministic_60_40_split(monkeypatch):
-    from data import dataset as dataset_module
+    from src.data import humaneval as dataset_module
 
     raw_rows = [
         {
@@ -162,8 +169,8 @@ def test_humaneval_dataset_uses_deterministic_60_40_split(monkeypatch):
 
     monkeypatch.setattr(dataset_module, "_load_hf_dataset", fake_load_dataset)
 
-    train_dataset = dataset_module.MultiAgentDataset(task="humaneval", split="train")
-    test_dataset = dataset_module.MultiAgentDataset(task="humaneval", split="test")
+    train_dataset = MultiAgentDataset(task="humaneval", split="train")
+    test_dataset = MultiAgentDataset(task="humaneval", split="test")
 
     assert len(train_dataset) == 6
     assert len(test_dataset) == 4
@@ -174,7 +181,7 @@ def test_humaneval_dataset_uses_deterministic_60_40_split(monkeypatch):
 
 
 def test_humaneval_dataset_rejects_validation_split(monkeypatch):
-    from data import dataset as dataset_module
+    from src.data import humaneval as dataset_module
 
     monkeypatch.setattr(
         dataset_module,
@@ -183,4 +190,4 @@ def test_humaneval_dataset_rejects_validation_split(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="Unsupported split"):
-        dataset_module.MultiAgentDataset(task="humaneval", split="validation")
+        MultiAgentDataset(task="humaneval", split="validation")

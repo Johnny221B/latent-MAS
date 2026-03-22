@@ -1,5 +1,5 @@
 model:
-  name: "Qwen/Qwen3-8B"
+  name: "Qwen/Qwen3-4B"
   frozen: true
   dtype: "bfloat16"
 
@@ -13,40 +13,38 @@ compressor:
   dropout: 0.1
 
 training:
-  task: "gsm8k"
-  train_strategy: "full_finetune"
+  task: "humaneval"
   input_mode: "chat_with_prefix"
-  batch_size: 32
-  lr: 0.0001
+  batch_size: 1
+  lr: 0.0005
   weight_decay: 0.01
-  epochs: 64
-  max_seq_len: 2048
+  epochs: 1
+  max_seq_len: 1024
   lambda_add: 0.1
   lambda_drop: 0.005
   lambda_sparse: 0.005
   gradient_accumulation_steps: 1
-  drop_last: false
   log_interval: 1
-  save_interval: 0
-  save_final_checkpoint: false
-
-reasoning:
-  steps_per_agent: 25
-  compress_last_k: 25
+  save_interval: 1000
+  drop_last: false
 
 evaluation:
-  run_after_train: true
-  max_new_tokens: 128
-  batch_size: 32
-  train_probe_samples: 64
-  test_probe_samples: 64
-  inference_mode: "chat_with_prefix"
-  use_terminal_prefix: true
+  metric: "pass_at_k"
+  split_scheme: "debug_60_40"
+  test_probe_samples: 4
+  num_samples_per_task: 1
+  pass_at_k: [1]
+  max_new_tokens: 256
+  batch_size: 1
   do_sample: false
-  write_agent_logs: false
+  run_after_train: true
+
+reasoning:
+  steps_per_agent: 8
+  compress_last_k: 8
 
 output:
-  dir: "outputs/gsm8k_qwen3-8b_probe64_full_finetune"
+  dir: "outputs/humaneval_qwen3-4b_smoke"
   log_dir: "logs"
 
 report:

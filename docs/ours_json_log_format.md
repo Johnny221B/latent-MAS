@@ -18,7 +18,7 @@
 outputs/gsm8k_qwen3-8b_xxx/
 ```
 
-如果使用 `evaluate.py --question "..." --output-dir <dir>` 或 [`scripts/inference.sh`](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/inference.sh)，这些文件会写到指定的 `output_dir`，而不是 checkpoint 目录本身。
+如果使用 `evaluate.py --question "..." --output-dir <dir>` 或 [`scripts/inference.sh`](../scripts/inference.sh)，这些文件会写到指定的 `output_dir`，而不是 checkpoint 目录本身。
 
 ---
 

@@ -32,7 +32,7 @@ src/cli/evaluate.py
 dataset 注册位置：
 
 ```bash
-data/dataset.py
+src/data/
 ```
 
 当前已提供的现成实验 YAML：
@@ -40,3 +40,5 @@ data/dataset.py
 - `configs/experiments/arc_easy_5agent.yaml`
 - `configs/experiments/arc_challenge_5agent.yaml`
 - `configs/experiments/humaneval_5agent.yaml`
+- `configs/experiments/arc_easy_5agent_qwen3_4b_smoke.yaml`
+- `configs/experiments/humaneval_5agent_qwen3_4b_smoke.yaml`

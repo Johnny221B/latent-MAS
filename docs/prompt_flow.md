@@ -12,12 +12,12 @@
 
 当前仓库中的角色文件包括：
 
-- [reader.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/roles/reader.json)
-- [planner.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/roles/planner.json)
-- [analyst.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/roles/analyst.json)
-- [solver.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/roles/solver.json)
-- [summarizer.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/roles/summarizer.json)
-- [critic.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/roles/critic.json)
+- [reader.json](../configs/roles/reader.json)
+- [planner.json](../configs/roles/planner.json)
+- [analyst.json](../configs/roles/analyst.json)
+- [solver.json](../configs/roles/solver.json)
+- [summarizer.json](../configs/roles/summarizer.json)
+- [critic.json](../configs/roles/critic.json)
 
 这些文件的结构基本一致，例如：
 
@@ -45,8 +45,8 @@ prompt 内容和执行顺序是分开定义的。
 
 当前图配置包括：
 
-- [3agent_sequential.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/graphs/3agent_sequential.json)
-- [5agent_fan_in.json](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/graphs/5agent_fan_in.json)
+- [3agent_sequential.json](../configs/graphs/3agent_sequential.json)
+- [5agent_fan_in.json](../configs/graphs/5agent_fan_in.json)
 
 例如三智能体顺序图中：
 
@@ -73,7 +73,7 @@ prompt 内容和执行顺序是分开定义的。
 
 ## 4. `ours` 方法的 prompt 如何被加载
 
-`ours` 的 prompt 加载入口在 [multi_agent_system.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/pipeline/multi_agent_system.py)。
+`ours` 的 prompt 加载入口在 [multi_agent_system.py](../src/pipeline/multi_agent_system.py)。
 
 整体流程如下：
 
@@ -94,7 +94,7 @@ prompt 内容和执行顺序是分开定义的。
 
 ## 5. `Agent` 如何把 prompt 拼进输入
 
-真正把 prompt 拼到模型输入中的地方在 [agent.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/agent.py)。
+真正把 prompt 拼到模型输入中的地方在 [agent.py](../src/models/agent.py)。
 
 关键字段与函数如下：
 
@@ -401,7 +401,7 @@ chat_with_text
 
 对 `ours` 方法来说，答案是否生成于训练还是评测，并不会切换到另一套 prompt 文件。
 
-评测入口在 [evaluate.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/cli/evaluate.py)。这个脚本做的事情是：
+评测入口在 [evaluate.py](../src/cli/evaluate.py)。这个脚本做的事情是：
 
 1. 读取保存下来的 config。
 2. 构造 `MultiAgentSystem`。
@@ -417,7 +417,7 @@ chat_with_text
 
 ## 7. `single-model baseline` 的 prompt 放在哪里
 
-单模型 baseline 入口在 [run_baseline_single_model.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/cli/run_baseline_single_model.py)。
+单模型 baseline 入口在 [run_baseline_single_model.py](../src/cli/run_baseline_single_model.py)。
 
 这一路径没有多智能体角色 prompt，也没有单独的 prompt 模板文件。它的做法是直接把原始问题 `question` tokenize 后送进模型生成。
 
@@ -435,7 +435,7 @@ $$
 
 原论文 baseline 的 prompt 位于嵌套仓库 `LatentMAS/` 中，核心文件是：
 
-- [prompts.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/LatentMAS/prompts.py)
+- [prompts.py](../LatentMAS/prompts.py)
 
 其中主要有两组构造函数：
 
@@ -464,7 +464,7 @@ $$
 
 原论文 baseline 的执行逻辑在：
 
-- [latent_mas.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/LatentMAS/methods/latent_mas.py)
+- [latent_mas.py](../LatentMAS/methods/latent_mas.py)
 
 这个文件里会遍历一组默认 agent，并按角色调用：
 

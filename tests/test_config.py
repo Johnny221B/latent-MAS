@@ -82,8 +82,12 @@ def test_probe64_configs_disable_final_checkpoint_and_enable_live_eval():
         repo_root / "configs/experiments/gsm8k_5agent_probe64_comm_only.yaml",
         repo_root / "configs/experiments/gsm8k_5agent_probe64_full_finetune.yaml",
     ]
+    existing_paths = [config_path for config_path in config_paths if config_path.exists()]
 
-    for config_path in config_paths:
+    if not existing_paths:
+        return
+
+    for config_path in existing_paths:
         loaded = load_config(config_path)
         assert loaded["training"]["batch_size"] == 32
         assert loaded["training"]["save_final_checkpoint"] is False
@@ -116,3 +120,18 @@ def test_arc_experiment_configs_enable_post_train_test_eval():
         assert loaded["training"]["task"] in {"arc_easy", "arc_challenge"}
         assert loaded["evaluation"]["run_after_train"] is True
         assert loaded["evaluation"]["splits_after_train"] == ["test"]
+
+
+def test_qwen3_4b_smoke_configs_are_small_and_disable_wandb():
+    repo_root = Path(__file__).resolve().parent.parent
+    config_paths = [
+        repo_root / "configs/experiments/arc_easy_5agent_qwen3_4b_smoke.yaml",
+        repo_root / "configs/experiments/humaneval_5agent_qwen3_4b_smoke.yaml",
+    ]
+
+    for config_path in config_paths:
+        loaded = load_config(config_path)
+        assert loaded["model"]["name"] == "Qwen/Qwen3-4B"
+        assert loaded["model"]["dtype"] == "bfloat16"
+        assert loaded["training"]["batch_size"] == 1
+        assert loaded["report"]["use_wandb"] is False

@@ -34,7 +34,7 @@ $$
 
 ## 2. 数据定义
 
-数据处理逻辑定义在 [dataset.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/data/dataset.py)。
+数据处理逻辑定义在 [factory.py](../src/data/factory.py) 与 [base.py](../src/data/base.py)，具体数据集逻辑按任务拆分在 [gsm8k.py](../src/data/gsm8k.py)、[arc.py](../src/data/arc.py)、[humaneval.py](../src/data/humaneval.py)。
 
 ### 2.1 当前支持的数据集
 
@@ -108,7 +108,7 @@ B. ...
 
 因此，从训练代码角度，一个 batch 的监督信号并不是“整段提示词 + 答案”的统一序列，而是问题和答案被分开编码，之后在终端 agent 中再拼接。
 
-当前默认实验配置 [gsm8k_5agent.yaml](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
+当前默认实验配置 [gsm8k_5agent.yaml](../configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
 
 对 ARC 而言，这里的 `question` 已经是“原题 + Choices”拼接后的文本；chat template 不会再单独处理结构化 `choices` 字段。
 
@@ -128,11 +128,11 @@ B. ...
 
 ## 3. 模型组成
 
-顶层模块定义在 [multi_agent_system.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/pipeline/multi_agent_system.py)。从训练视角出发，整个系统可以拆成五个核心部分。
+顶层模块定义在 [multi_agent_system.py](../src/pipeline/multi_agent_system.py)。从训练视角出发，整个系统可以拆成五个核心部分。
 
 ### 3.1 冻结的基础语言模型
 
-基础模型定义在 [base_model.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/base_model.py)。
+基础模型定义在 [base_model.py](../src/models/base_model.py)。
 
 它负责：
 
@@ -145,7 +145,7 @@ B. ...
 
 ### 3.2 角色化 agent
 
-agent 逻辑定义在 [agent.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/agent.py)。
+agent 逻辑定义在 [agent.py](../src/models/agent.py)。
 
 设系统中共有 $N$ 个 agent，记第 $j$ 个 agent 为 $a_j$。每个 agent 具有：
 
@@ -166,7 +166,7 @@ agent 逻辑定义在 [agent.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-M
 
 ### 3.3 LatentCompressor
 
-压缩模块定义在 [compressor.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/models/compressor.py)。
+压缩模块定义在 [compressor.py](../src/models/compressor.py)。
 
 设第 $j$ 个非终端 agent 的 latent trajectory 为：
 
@@ -192,7 +192,7 @@ $$
 
 ### 3.4 LearnableAdjacency
 
-图结构模块定义在 [adjacency.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/graph/adjacency.py)。
+图结构模块定义在 [adjacency.py](../src/graph/adjacency.py)。
 
 设图的 raw logits 为：
 
@@ -220,7 +220,7 @@ $$
 
 ### 3.5 图执行器与消息聚合器
 
-执行器定义在 [dag_executor.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/graph/dag_executor.py)，消息聚合定义在 [aggregator.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/communication/aggregator.py)。
+执行器定义在 [dag_executor.py](../src/graph/dag_executor.py)，消息聚合定义在 [aggregator.py](../src/communication/aggregator.py)。
 
 对于下游节点 $j$，若它接收到多个上游 prefix，则聚合方式为：
 
@@ -373,7 +373,7 @@ $$
 
 ## 4.6 阶段六：监督标签构造
 
-标签构造定义在 [dataset.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/data/dataset.py) 中的 `build_labels()`。
+标签构造定义在 [base.py](../src/data/base.py) 中的 `build_labels()`。
 
 设问题长度为 $|X|$，答案长度为 $|Y|$。则监督标签定义为：
 
@@ -397,7 +397,7 @@ $$
 
 ### 5.1 任务损失
 
-任务损失定义在 [task_loss.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/losses/task_loss.py)。
+任务损失定义在 [task_loss.py](../src/losses/task_loss.py)。
 
 当前使用的是标准 causal language modeling 的 shift cross-entropy。设终端 logits 为：
 
@@ -423,7 +423,7 @@ $$
 
 ### 5.2 图损失
 
-图损失定义在 [graph_loss.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/losses/graph_loss.py)。
+图损失定义在 [graph_loss.py](../src/losses/graph_loss.py)。
 
 设先验图为：
 
@@ -513,8 +513,8 @@ $$
 
 训练入口包括：
 
-- [train.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/train.py)
-- [multi_train.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/scripts/multi_train.py)
+- [train.py](../scripts/train.py)
+- [multi_train.py](../scripts/multi_train.py)
 
 其中多卡训练使用 DDP。
 

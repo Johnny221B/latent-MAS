@@ -30,7 +30,7 @@ from torch.utils.data import Subset
 from src.utils.config import load_config
 from src.utils.answer_extraction import extract_answer
 from src.pipeline.multi_agent_system import MultiAgentSystem
-from data.dataset import create_dataset
+from src.data import create_dataset
 from src.models.agent import Agent
 
 
@@ -306,6 +306,7 @@ def _evaluate_loaded_system_humaneval(
     rank: int,
     world_size: int,
     is_dist: bool,
+    cleanup_distributed: bool,
 ):
     evaluation_cfg = config.get("evaluation", {})
     num_samples_per_task = int(evaluation_cfg.get("num_samples_per_task", 1))
@@ -393,7 +394,8 @@ def _evaluate_loaded_system_humaneval(
     if not is_main_process(rank):
         if is_dist:
             dist.barrier()
-            cleanup_eval_distributed()
+            if cleanup_distributed:
+                cleanup_eval_distributed()
         return None
 
     samples_path = output_dir / "humaneval_samples.jsonl"
@@ -479,7 +481,8 @@ def _evaluate_loaded_system_humaneval(
 
     if is_dist:
         dist.barrier()
-    cleanup_eval_distributed()
+    if cleanup_distributed:
+        cleanup_eval_distributed()
     return result_payload
 
 
@@ -546,6 +549,7 @@ def evaluate_loaded_system(
     rank: int = 0,
     world_size: int = 1,
     is_dist: bool = False,
+    cleanup_distributed: bool = True,
 ):
     generation_max_new_tokens = max_new_tokens
     output_dir = Path(output_dir)
@@ -588,6 +592,7 @@ def evaluate_loaded_system(
             rank=rank,
             world_size=world_size,
             is_dist=is_dist,
+            cleanup_distributed=cleanup_distributed,
         )
     if max_samples is not None and max_samples < 0:
         max_samples = None
@@ -1127,7 +1132,8 @@ def evaluate(
     if not is_main_process(rank):
         if is_dist:
             dist.barrier()
-            cleanup_eval_distributed()
+            if cleanup_distributed:
+                cleanup_eval_distributed()
         return
 
     # ── Summary ──
@@ -1193,7 +1199,8 @@ def evaluate(
     if not run_baseline:
         if is_dist:
             dist.barrier()
-        cleanup_eval_distributed()
+        if cleanup_distributed:
+            cleanup_eval_distributed()
         return
 
     # ── Also run baseline (no multi-agent, just the model) ──

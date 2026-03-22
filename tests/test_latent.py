@@ -114,15 +114,12 @@ def run_test(model_path: str):
     print(f"\n  final_logits shape: {final_logits.shape}")
 
     # Create labels (tokenize the answer)
-    from data.dataset import build_labels
+    from src.data import build_labels
 
     label_tokenized = base_model.tokenize([GROUND_TRUTH], max_length=32)
     answer_ids = label_tokenized["input_ids"].to(device)
 
-    labels = build_labels(
-        task_token_ids=task_ids,
-        answer_token_ids=answer_ids,
-    )
+    labels = build_labels(question_len=task_ids.shape[1], answer_ids=answer_ids)
     print(f"  labels shape: {labels.shape} (answer_len={answer_ids.shape[1]}, task_len={task_ids.shape[1]})")
     print(f"  supervised positions: {(labels != -100).sum().item()}")
 

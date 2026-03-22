@@ -19,6 +19,8 @@
 - `docs/data/arc.md`
 - `docs/data/humaneval.md`
 
+当前数据模块源码位于 `src/data/`，并按数据集拆分为独立模块，不再使用根目录 `data/` 包。
+
 ## Plans
 
 `docs/plans/` 保存面向实现的设计稿和实施计划，不是当前运行行为的最终来源。

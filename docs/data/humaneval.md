@@ -8,7 +8,7 @@
   - `train` = first `60%`
   - `test` = remaining `40%`
 
-代码注册位置见 [dataset.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/data/dataset.py) 中的 `TASK_CONFIGS["humaneval"]` 与 `_apply_humaneval_split(...)`。
+代码注册位置见 [humaneval.py](../../src/data/humaneval.py) 与 [factory.py](../../src/data/factory.py) 中的 `build_task_configs()["humaneval"]` 与 `_apply_humaneval_split(...)`。
 
 这不是完整官方 HumanEval benchmark 划分，而是当前仓库里的本地 `debug_60_40` 运行方式。
 
@@ -42,6 +42,12 @@ export PYTHONPATH=/tmp/human-eval${PYTHONPATH:+:$PYTHONPATH}
 configs/experiments/humaneval_5agent.yaml
 ```
 
+最小链路验证配置：
+
+```bash
+configs/experiments/humaneval_5agent_qwen3_4b_smoke.yaml
+```
+
 但这份配置的原始参数在两卡上容易 OOM。当前实际跑通的一组安全参数是：
 
 - `training.batch_size = 1`
@@ -63,9 +69,17 @@ uv run --python .venv/bin/python torchrun \
 
 如果需要，可以先基于现有 YAML 生成一份临时安全配置再训练。
 
+当前仓库也直接提供了 `Qwen/Qwen3-4B` smoke 配置，默认采用：
+
+- `training.batch_size = 1`
+- `training.max_seq_len = 1024`
+- `evaluation.num_samples_per_task = 1`
+- `evaluation.pass_at_k = [1]`
+- `report.use_wandb = false`
+
 ## Eval
 
-`HumanEval` 评测复用 [evaluate.py](/blue/buyuheng/chengzhi.ucsb/code/toby/latent-MAS/src/cli/evaluate.py)，但它不会走字符串 exact-match，而是：
+`HumanEval` 评测复用 [evaluate.py](../../src/cli/evaluate.py)，但它不会走字符串 exact-match，而是：
 
 1. 生成 completion
 2. 写出 `humaneval_samples.jsonl`
