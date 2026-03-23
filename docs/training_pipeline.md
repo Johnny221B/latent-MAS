@@ -99,13 +99,13 @@ B. ...
 {
   "question_id": problem,
   "question": problem,
-  "answer": <从 solution 中抽出的最终答案>,
+  "answer": solution,
   "level": ...,
   "type": ...
 }
 ```
 
-其中答案抽取优先匹配 `\boxed{...}`，其次兼容 `final answer is ...` 这类尾部答案表达。当前不会做数学表达式的符号等价判定，相关准确率仍然基于规范化后的字符串 exact-match。
+其中训练监督直接使用完整 `solution` 文本。评测与训练期 probe 则仍会从模型生成文本中抽取最终答案，抽取时优先匹配 `\boxed{...}`，其次兼容 `final answer is ...` 这类尾部答案表达。当前不会做数学表达式的符号等价判定，相关准确率仍然基于规范化后的字符串 exact-match。
 
 ### 2.2 训练批次的输入形式
 
@@ -115,6 +115,16 @@ B. ...
 - `answers: list[str]`
 
 训练 dataloader 默认会对训练集做 shuffle。当前语义是 `training.shuffle = true` 为默认值；只有在实验配置中显式设成 `false` 时，训练样本顺序才会保持固定。单卡路径和 DDP 路径都遵循这个开关。
+
+当前训练入口还会显式应用 `training.seed`。它默认回填为 `42`，并用于：
+
+- Python `random`
+- `torch` / `torch.cuda`
+- 可用时的 `numpy`
+- DDP `DistributedSampler(seed=...)`
+- 单卡 shuffle dataloader 的 `generator`
+
+这意味着在代码、配置、world size 与输入数据都不变时，训练初始化与样本顺序会尽量保持可复现。
 
 然后，这两部分文本会分别被 tokenizer 编码为：
 
@@ -127,7 +137,7 @@ B. ...
 
 当前默认实验配置 [gsm8k_5agent.yaml](../configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
 
-`competition_math` 也沿用这一路径；不同之处只在于监督答案来自 `solution` 中抽出的最终答案，而不是 GSM8K 的 `####` 段落。
+`competition_math` 也沿用这一路径；不同之处只在于监督答案是完整 `solution` 文本，而不是 GSM8K 的 `####` 段落或抽取后的单个最终答案字符串。
 
 对 ARC 而言，这里的 `question` 已经是“原题 + Choices”拼接后的文本；chat template 不会再单独处理结构化 `choices` 字段。
 
@@ -145,13 +155,26 @@ B. ...
 
 若本地没有安装 `human_eval`，或者没有启用其执行 harness，当前实现会直接报错，不会退回字符串匹配。
 
-`competition_math` 的默认实验路径与上述正式评测流不同：它默认关闭 `evaluation.run_after_train`，改为在训练期间通过 `training_probe` 配置做固定 `100` 条样本的 in-memory probe。具体行为是：
+`competition_math` 的当前正式实验配置与上述正式评测流不同：它关闭 `evaluation.run_after_train`，并将 `training_probe.samples` 设为 `0`，因此不会默认切出训练期 probe 子集。对应地：
 
-- 从 `train` split 中按固定随机种子留出 `100` 条 probe-only 样本
+- 整个 `train` split 都会进入训练 dataloader
+- 训练期间不会写 `probe_split.json` / `probe_history.json`
+
+若改用 debug 配置，或手动把 `training_probe.samples` 设为正数，则会启用 in-memory probe。启用后的行为是：
+
+- 从 `train` split 中按固定随机种子留出 `training_probe.samples` 条 probe-only 样本
 - 剩余样本进入训练 dataloader
 - 每隔若干个 optimizer step 跑一次 probe acc
 - probe 结果写到 `probe_history.json`
 - 若正式 run 启用 W&B，则按同一 `global_step` 上报 `probe/accuracy` 等指标
+
+当前 probe 指标还会额外统计：
+
+- `max_new_tokens_count`
+- `max_new_tokens_ratio`
+- `degenerate`
+
+其中 `degenerate` 的默认判定条件是：当前 probe 中至少 `50%` 的样本以 `finish_reason = "max_new_tokens"` 结束。这一信号用于尽早发现“输出反复重复并持续打满长度上限”的退化 run。
 
 ## 3. 模型组成
 
@@ -577,9 +600,15 @@ $$
 多卡训练脚本会在输出目录中保存：
 
 - `config.yaml`
+- `run_provenance.json`
 - `loss_log.csv`
 - `checkpoint_step*.pt`
 - `final_model.pt`
+
+若启用了 training probe，还会额外保存：
+
+- `probe_split.json`
+- `probe_history.json`
 
 其中 `final_model.pt` 中主要包含：
 
@@ -588,6 +617,16 @@ $$
 - `config`
 
 不会重新保存基础模型权重，因为基础模型来自 Hugging Face 且始终冻结。
+
+`run_provenance.json` 用于记录本次训练的最小可追溯信息，包括：
+
+- 训练 seed
+- 启动参数 `argv`
+- 当前 `rank / world_size`
+- `CUDA_VISIBLE_DEVICES` 等关键环境变量
+- 训练时的 git commit / branch / `git status --short` / `git diff --stat HEAD`
+
+它的目的不是替代完整实验记录系统，而是让输出目录本身能够回答“这次 run 实际是拿什么代码、什么命令、什么 seed 跑出来的”。
 
 ## 9. 与原论文的关系
 

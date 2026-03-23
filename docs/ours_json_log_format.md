@@ -6,8 +6,9 @@
 - `agent_logs.json`
 - `agent_log/<role>.json`
 
-对于 `competition_math` 这类只做 train-time probe 的任务，训练目录下还会额外出现：
+对于启用了 train-time probe 的 `competition_math` 任务，训练目录下还会额外出现：
 
+- `run_provenance.json`
 - `probe_split.json`
 - `probe_history.json`
 
@@ -25,11 +26,52 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 如果使用 `evaluate.py --question "..." --output-dir <dir>` 或 [`scripts/inference.sh`](../scripts/inference.sh)，这些文件会写到指定的 `output_dir`，而不是 checkpoint 目录本身。
 
-`competition_math` 默认不通过 `evaluate.py` 产出上述 `eval_results.json` 作为主结果，而是通过训练期间的 `probe_history.json` 观察 acc 曲线。
+`competition_math` 默认不通过 `evaluate.py` 产出上述 `eval_results.json` 作为主结果。若启用了 `training_probe`，则主要通过训练期间的 `probe_history.json` 观察 acc 曲线。
 
 ---
 
 ## 0. Training Probe Logs
+
+`run_provenance.json` 用于记录这次训练的启动与代码来源信息：
+
+```json
+{
+  "captured_at": "2026-03-23T06:45:00Z",
+  "output_dir": "outputs/gsm8k_qwen3-8b_20260323_064500",
+  "config_path": "configs/experiments/gsm8k_5agent.yaml",
+  "cwd": "/repo/root",
+  "hostname": "c1010a-s25",
+  "training": {
+    "seed": 42,
+    "is_ddp": true
+  },
+  "launch": {
+    "argv": ["python", "src/cli/train.py", "--config", "..."],
+    "rank": 0,
+    "world_size": 2,
+    "environment": {
+      "CUDA_VISIBLE_DEVICES": "0,1",
+      "LOCAL_RANK": "0",
+      "RANK": "0",
+      "WORLD_SIZE": "2"
+    }
+  },
+  "git": {
+    "commit": "abc123...",
+    "branch": "toby",
+    "status_short": [" M src/cli/train.py"],
+    "diff_stat": [" src/cli/train.py | 10 +++++++++-"],
+    "is_dirty": true
+  }
+}
+```
+
+其中：
+
+- `training.seed` 是当前训练实际使用的随机种子
+- `launch.argv` 是训练入口的原始参数列表
+- `launch.environment` 只保留与分布式启动直接相关的关键环境变量
+- `git.*` 用来回答这次 run 对应的代码版本与工作树状态
 
 `probe_split.json` 用于记录这次训练固定留出的 probe 子集来源：
 
@@ -55,7 +97,10 @@ outputs/gsm8k_qwen3-8b_xxx/
       "total": 100,
       "time_seconds": 88.4,
       "avg_sample_seconds": 0.884,
-      "avg_generated_tokens": 54.2
+      "avg_generated_tokens": 54.2,
+      "max_new_tokens_count": 63,
+      "max_new_tokens_ratio": 0.63,
+      "degenerate": true
     },
     "samples": [
       {
@@ -75,6 +120,9 @@ outputs/gsm8k_qwen3-8b_xxx/
 
 - `global_step` 是触发 probe 时的 optimizer step
 - `metrics` 是当前 `100` 条 probe 子集上的聚合指标
+- `metrics.max_new_tokens_count` 表示有多少条样本在 probe 中打满了生成长度上限
+- `metrics.max_new_tokens_ratio` 表示上述样本占比
+- `metrics.degenerate` 表示这一轮 probe 是否被判定为退化。当前默认规则是 `max_new_tokens_ratio >= training_probe.degenerate_max_new_tokens_ratio`
 - `samples` 只在 `training_probe.write_predictions_json = true` 时写出
 
 ## 1. `eval_results.json`

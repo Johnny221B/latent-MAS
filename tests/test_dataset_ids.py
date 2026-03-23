@@ -193,7 +193,7 @@ def test_humaneval_dataset_rejects_validation_split(monkeypatch):
         MultiAgentDataset(task="humaneval", split="validation")
 
 
-def test_competition_math_dataset_extracts_boxed_answer(monkeypatch):
+def test_competition_math_dataset_uses_full_solution_as_training_target(monkeypatch):
     from src.data import competition_math as dataset_module
 
     raw_rows = [
@@ -229,7 +229,7 @@ def test_competition_math_dataset_extracts_boxed_answer(monkeypatch):
 
     assert sample["question_id"] == "Compute 6 * 7."
     assert sample["question"] == "Compute 6 * 7."
-    assert sample["answer"] == "42"
+    assert sample["answer"] == "We get 42, so the final answer is \\boxed{42}."
     assert sample["level"] == "Level 1"
     assert sample["type"] == "algebra"
 

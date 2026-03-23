@@ -45,9 +45,9 @@
 
 ## Current competition_math Status
 
-当前仓库已支持 `competition_math` 训练接入，但默认只做训练期 probe 监控，不做正式 post-train eval：
+当前仓库已支持 `competition_math` 训练接入，但默认不做正式 post-train eval：
 
-- 从唯一 `train` split 中固定留出 `100` 条样本作为 `probe`
-- `probe` 不参与梯度更新
-- 训练过程中按 `global_step` 记录 `probe accuracy`
+- 正式配置 [`competition_math_5agent.yaml`](./../configs/experiments/competition_math_5agent.yaml) 当前将 `training_probe.samples` 设为 `0`，因此不会额外留出 probe 子集
+- 调试配置 [`competition_math_5agent_debug.yaml`](./../configs/experiments/competition_math_5agent_debug.yaml) 将 `training_probe.samples` 设为 `100`，用于训练期间的 probe 监控
+- 若启用 probe，`probe` 不参与梯度更新，训练过程中按 `global_step` 记录 `probe accuracy`
 - 调试配置默认禁用 W&B；正式配置才会上报线上 run
