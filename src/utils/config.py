@@ -63,6 +63,7 @@ def _normalize_config(config: dict) -> None:
     training_cfg["train_base_model"] = train_strategy == "full_finetune"
     training_cfg.setdefault("save_final_checkpoint", True)
     training_cfg.setdefault("shuffle", True)
+    training_cfg.setdefault("seed", 42)
 
     evaluation_cfg = config.setdefault("evaluation", {})
     evaluation_cfg.setdefault("run_after_train", False)
@@ -74,5 +75,6 @@ def _normalize_config(config: dict) -> None:
     probe_cfg.setdefault("every_n_steps", 0)
     probe_cfg.setdefault("batch_size", 1)
     probe_cfg.setdefault("max_new_tokens", 64)
+    probe_cfg.setdefault("degenerate_max_new_tokens_ratio", 0.5)
     probe_cfg.setdefault("write_predictions_json", False)
     probe_cfg.setdefault("write_agent_logs", False)

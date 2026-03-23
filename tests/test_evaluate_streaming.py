@@ -1072,3 +1072,261 @@ def test_evaluate_cli_delegates_humaneval_to_loaded_system(tmp_path: Path, monke
     assert called["kwargs"]["split"] == "test"
     assert called["kwargs"]["max_new_tokens"] == 64
     assert called["kwargs"]["output_dir"] == tmp_path
+
+
+def test_evaluate_loaded_system_baseline_supports_batch_size_gt_one(tmp_path: Path, monkeypatch):
+    from src.cli import evaluate as evaluate_module
+
+    class DummyBaseModel:
+        def __init__(self):
+            self.tokenizer = type(
+                "DummyTokenizer",
+                (),
+                {
+                    "pad_token_id": 0,
+                    "eos_token_id": 2,
+                    "decode": staticmethod(lambda token_ids, skip_special_tokens=True: str(token_ids[-1] - 8)),
+                },
+            )()
+            self.model = self
+
+        def tokenize(self, texts, max_length=2048, add_special_tokens=True):
+            batch = len(texts)
+            return {
+                "input_ids": torch.ones(batch, 3, dtype=torch.long),
+                "attention_mask": torch.ones(batch, 3, dtype=torch.long),
+            }
+
+        def generate(
+            self,
+            input_ids,
+            attention_mask=None,
+            max_new_tokens=0,
+            do_sample=False,
+            pad_token_id=0,
+            return_dict_in_generate=True,
+        ):
+            batch = input_ids.shape[0]
+            prompt_len = input_ids.shape[1]
+            completions = torch.tensor([[9], [10]], dtype=torch.long)[:batch]
+            sequences = torch.cat([input_ids, completions], dim=1)
+            return type("DummyGenerateOutput", (), {"sequences": sequences})()
+
+    class DummySystem:
+        def __init__(self):
+            self.base_model = DummyBaseModel()
+
+        def eval(self):
+            return self
+
+        def __call__(
+            self,
+            task_token_ids,
+            task_attention_mask=None,
+            max_new_tokens=0,
+            inference_mode="chat_with_prefix",
+            use_terminal_prefix=True,
+            do_sample=False,
+            collect_agent_logs=False,
+        ):
+            batch = task_token_ids.shape[0]
+            generated = [str(i + 1) for i in range(batch)]
+            return {
+                "generated_text": generated,
+                "generation": {
+                    "generated_text": generated,
+                    "finish_reason": ["eos"] * batch,
+                    "generated_token_count": [1] * batch,
+                    "stopped_early": [True] * batch,
+                },
+                "agent_logs": [],
+            }
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "create_dataset",
+        lambda task, split, max_samples=None: [
+            {"question_id": "q-1", "question": "q1", "answer": "1"},
+            {"question_id": "q-2", "question": "q2", "answer": "2"},
+        ],
+    )
+    monkeypatch.setattr(evaluate_module, "extract_answer", lambda text, task_type: text.strip())
+
+    evaluate_module.evaluate_loaded_system(
+        system=DummySystem(),
+        config={"training": {"task": "gsm8k", "max_seq_len": 32}},
+        config_path="dummy-config.yaml",
+        output_dir=tmp_path,
+        checkpoint_path=None,
+        max_samples=2,
+        split="test",
+        max_new_tokens=8,
+        inference_mode="chat_with_prefix",
+        use_terminal_prefix=True,
+        run_baseline=True,
+        do_sample=False,
+        write_agent_logs=False,
+        worker=None,
+        batch_size=2,
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=1,
+        is_dist=False,
+    )
+
+    payload = json.loads((tmp_path / "eval_results.json").read_text())
+    baseline = payload["baseline_single_model"]
+    assert baseline["metrics"]["total"] == 2
+    assert baseline["metrics"]["correct"] == 2
+    assert [sample["question_id"] for sample in baseline["samples"]] == ["q-1", "q-2"]
+
+
+def test_evaluate_loaded_system_uses_tqdm_progress_bar(tmp_path: Path, monkeypatch):
+    from src.cli import evaluate as evaluate_module
+
+    tqdm_calls = []
+
+    class DummyTqdm:
+        def __init__(self, iterable, **kwargs):
+            self.iterable = iterable
+            self.kwargs = kwargs
+            tqdm_calls.append(kwargs)
+
+        def __iter__(self):
+            return iter(self.iterable)
+
+        def update(self, n=1):
+            return None
+
+        def close(self):
+            return None
+
+    class DummyBaseModel:
+        def tokenize(self, texts, max_length=2048, add_special_tokens=True):
+            batch = len(texts)
+            return {
+                "input_ids": torch.ones(batch, 3, dtype=torch.long),
+                "attention_mask": torch.ones(batch, 3, dtype=torch.long),
+            }
+
+    class DummySystem:
+        def __init__(self):
+            self.base_model = DummyBaseModel()
+
+        def eval(self):
+            return self
+
+        def __call__(self, task_token_ids, **kwargs):
+            batch = task_token_ids.shape[0]
+            return {
+                "generated_text": ["1"] * batch,
+                "generation": {
+                    "generated_text": ["1"] * batch,
+                    "finish_reason": ["eos"] * batch,
+                    "generated_token_count": [1] * batch,
+                    "stopped_early": [True] * batch,
+                },
+                "agent_logs": [],
+            }
+
+    monkeypatch.setattr(evaluate_module, "tqdm", DummyTqdm, raising=False)
+    monkeypatch.setattr(
+        evaluate_module,
+        "create_dataset",
+        lambda task, split, max_samples=None: [{"question_id": "q-1", "question": "q1", "answer": "1"}],
+    )
+    monkeypatch.setattr(evaluate_module, "extract_answer", lambda text, task_type: text.strip())
+
+    evaluate_module.evaluate_loaded_system(
+        system=DummySystem(),
+        config={"training": {"task": "gsm8k", "max_seq_len": 32}},
+        config_path="dummy-config.yaml",
+        output_dir=tmp_path,
+        checkpoint_path=None,
+        max_samples=1,
+        split="test",
+        max_new_tokens=8,
+        inference_mode="chat_with_prefix",
+        use_terminal_prefix=True,
+        run_baseline=False,
+        do_sample=False,
+        write_agent_logs=False,
+        worker=None,
+        batch_size=1,
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=1,
+        is_dist=False,
+    )
+
+    assert tqdm_calls
+    assert tqdm_calls[0]["total"] == 1
+    assert "desc" in tqdm_calls[0]
+
+
+def test_evaluate_loaded_system_prints_red_warning_for_max_token_answers(
+    tmp_path: Path, monkeypatch, capsys
+):
+    from src.cli import evaluate as evaluate_module
+
+    class DummyBaseModel:
+        def tokenize(self, texts, max_length=2048, add_special_tokens=True):
+            batch = len(texts)
+            return {
+                "input_ids": torch.ones(batch, 3, dtype=torch.long),
+                "attention_mask": torch.ones(batch, 3, dtype=torch.long),
+            }
+
+    class DummySystem:
+        def __init__(self):
+            self.base_model = DummyBaseModel()
+
+        def eval(self):
+            return self
+
+        def __call__(self, task_token_ids, **kwargs):
+            batch = task_token_ids.shape[0]
+            return {
+                "generated_text": ["1 2 3 4"] * batch,
+                "generation": {
+                    "generated_text": ["1 2 3 4"] * batch,
+                    "finish_reason": ["max_new_tokens"] * batch,
+                    "generated_token_count": [4] * batch,
+                    "stopped_early": [False] * batch,
+                },
+                "agent_logs": [],
+            }
+
+    monkeypatch.setattr(
+        evaluate_module,
+        "create_dataset",
+        lambda task, split, max_samples=None: [{"question_id": "q-1", "question": "q1", "answer": "1"}],
+    )
+    monkeypatch.setattr(evaluate_module, "extract_answer", lambda text, task_type: text.strip())
+
+    evaluate_module.evaluate_loaded_system(
+        system=DummySystem(),
+        config={"training": {"task": "gsm8k", "max_seq_len": 32}},
+        config_path="dummy-config.yaml",
+        output_dir=tmp_path,
+        checkpoint_path=None,
+        max_samples=1,
+        split="test",
+        max_new_tokens=4,
+        inference_mode="chat_with_prefix",
+        use_terminal_prefix=True,
+        run_baseline=False,
+        do_sample=False,
+        write_agent_logs=False,
+        worker=None,
+        batch_size=1,
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=1,
+        is_dist=False,
+    )
+
+    stdout = capsys.readouterr().out
+    assert "\x1b[31m" in stdout
+    assert "q-1" in stdout
+    assert "max_new_tokens" in stdout

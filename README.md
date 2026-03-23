@@ -74,6 +74,8 @@ NPROC_PER_NODE=2 bash scripts/train.sh --config configs/experiments/gsm8k_5agent
 CKPT_FOLDER=outputs/your_checkpoint_dir bash scripts/evaluate.sh
 ```
 
+如果不传 `CKPT_FOLDER`，脚本会自动选择 `outputs/` 下最近一次包含 `config.yaml` 和 `final_model.pt` 的完整 checkpoint 目录。
+
 默认评测模式是：
 - `inference-mode = chat_with_prefix`
 - `max_samples = -1`

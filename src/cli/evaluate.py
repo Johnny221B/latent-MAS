@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data import Subset
+from tqdm.auto import tqdm
 
 from src.utils.config import load_config
 from src.utils.answer_extraction import extract_answer
@@ -98,6 +99,59 @@ def _select_batch_item(value, index: int):
     if isinstance(value, list):
         return value[index]
     return value
+
+
+def _build_progress_iterator(total_steps: int, *, desc: str, rank: int):
+    if not is_main_process(rank):
+        return range(total_steps)
+    return tqdm(
+        range(total_steps),
+        total=total_steps,
+        desc=desc,
+        dynamic_ncols=True,
+    )
+
+
+def _close_progress_iterator(progress) -> None:
+    close = getattr(progress, "close", None)
+    if callable(close):
+        close()
+
+
+def _generation_hit_token_limit(generation: dict, *, max_new_tokens: int) -> bool:
+    finish_reason = generation.get("finish_reason")
+    if finish_reason == "max_new_tokens":
+        return True
+
+    generated_token_count = generation.get("generated_token_count")
+    if generated_token_count is None:
+        return False
+    return bool(generated_token_count >= max_new_tokens and not generation.get("stopped_early", True))
+
+
+def _print_token_limit_warning(
+    *,
+    question_id: str,
+    question: str,
+    prediction: str,
+    generation: dict,
+    max_new_tokens: int,
+) -> None:
+    if not _generation_hit_token_limit(generation, max_new_tokens=max_new_tokens):
+        return
+
+    red = "\033[31m"
+    reset = "\033[0m"
+    generated_text = generation.get("generated_text") or prediction or ""
+    preview = generated_text.replace("\n", " ")[:200]
+    print(
+        f"{red}  Max-token warning [{question_id}]: "
+        f"finish_reason={generation.get('finish_reason')}, "
+        f"generated_token_count={generation.get('generated_token_count')}, "
+        f"limit={max_new_tokens}{reset}"
+    )
+    print(f"{red}    Q: {question[:120]}{reset}")
+    print(f"{red}    A: {preview}{reset}")
 
 
 def write_eval_snapshot(
@@ -371,6 +425,7 @@ def _evaluate_loaded_system_humaneval(
     sample_rows: list[dict] = []
     agent_log_rows: list[dict] = []
     t_start = time.time()
+    progress = _build_progress_iterator(len(dataloader), desc="HumanEval", rank=rank)
 
     with torch.no_grad():
         for batch in dataloader:
@@ -423,6 +478,22 @@ def _evaluate_loaded_system_humaneval(
                             agent_logs=agent_logs,
                         )
                     )
+            if is_main_process(rank):
+                for sample_idx in range(batch_size_actual):
+                    sample_generation = {
+                        key: _select_batch_item(value, sample_idx)
+                        for key, value in generation.items()
+                    }
+                    _print_token_limit_warning(
+                        question_id=str(batch_question_ids[sample_idx]),
+                        question=batch_questions[sample_idx],
+                        prediction=batch_generated_text[sample_idx],
+                        generation=sample_generation,
+                        max_new_tokens=max_new_tokens,
+                    )
+                if hasattr(progress, "update"):
+                    progress.update(1)
+    _close_progress_iterator(progress)
 
     gathered_rows = gather_sharded_objects(sample_rows, rank, world_size)
     gathered_agent_logs = gather_sharded_objects(agent_log_rows, rank, world_size)
@@ -677,8 +748,10 @@ def evaluate_loaded_system(
     max_steps = max(step_counts)
     dataloader_iter = iter(dataloader)
 
+    progress = _build_progress_iterator(max_steps, desc=f"Eval {task}", rank=rank)
+
     with torch.no_grad():
-        for idx in range(max_steps):
+        for idx in progress:
             batch = None
             local_update = None
             t0 = time.time()
@@ -768,6 +841,13 @@ def evaluate_loaded_system(
                     if write_agent_logs and shard_update["agent_log"] is not None:
                         agent_log_results.append(shard_update["agent_log"])
                     results.append(sample_result)
+                    _print_token_limit_warning(
+                        question_id=str(shard_update["question_id"]),
+                        question=shard_update["question"],
+                        prediction=shard_update["prediction"],
+                        generation=shard_update["generation"],
+                        max_new_tokens=generation_max_new_tokens,
+                    )
 
             params = {
                 "config_path": config_path,
@@ -816,6 +896,7 @@ def evaluate_loaded_system(
             if total > 0 and ((total % 10) == 0 or total == len(full_dataset)):
                 acc = correct / total * 100
                 print(f"  [{total}/{len(full_dataset)}] Acc: {acc:.1f}% ({correct}/{total})")
+    _close_progress_iterator(progress)
 
     if not is_main_process(rank):
         return None
@@ -840,9 +921,6 @@ def evaluate_loaded_system(
             print(f"  Tokens/sec: {sum(generated_token_counts)/sum(sample_durations):.2f}")
     print(f"{'='*60}")
 
-    if run_baseline:
-        print("Baseline comparison is not supported in evaluate_loaded_system().")
-
     result_payload = {
         "method": "ours_trained_multi_agent",
         "task": task,
@@ -866,6 +944,191 @@ def evaluate_loaded_system(
             "agent_log_path": str(agent_log_path) if write_agent_logs else None,
             "role_agent_log_dir": str(role_agent_log_dir) if write_agent_logs else None,
         },
+    }
+    if not run_baseline:
+        return result_payload
+
+    print(f"\n{'='*60}")
+    print(f"  BASELINE (single model, no multi-agent)")
+    print(f"{'='*60}")
+
+    baseline_correct = 0
+    baseline_total = 0
+    baseline_samples = []
+
+    dataloader_iter = iter(dataloader)
+    progress = _build_progress_iterator(max_steps, desc="Baseline", rank=rank)
+    for idx in progress:
+        baseline_update = None
+        if idx < local_steps:
+            batch = next(dataloader_iter)
+            tokenized = system.base_model.tokenize(
+                batch["questions"],
+                max_length=config["training"].get("max_seq_len", 2048),
+            )
+            task_ids = tokenized["input_ids"].to(device)
+            task_mask = tokenized["attention_mask"].to(device)
+
+            gen_out = system.base_model.model.generate(
+                input_ids=task_ids,
+                attention_mask=task_mask,
+                max_new_tokens=generation_max_new_tokens,
+                do_sample=False,
+                pad_token_id=system.base_model.tokenizer.pad_token_id,
+                return_dict_in_generate=True,
+            )
+            sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
+            batch_size_actual = task_ids.shape[0]
+            baseline_update = []
+            for sample_idx in range(batch_size_actual):
+                generated_token_ids = sequences[sample_idx][task_ids.shape[1]:].tolist()
+                baseline_text = system.base_model.tokenizer.decode(
+                    generated_token_ids,
+                    skip_special_tokens=True,
+                )
+                generation = build_generation_metadata(
+                    generated_token_ids=generated_token_ids,
+                    eos_token_id=system.base_model.tokenizer.eos_token_id,
+                    max_new_tokens=generation_max_new_tokens,
+                )
+                pred = extract_answer(baseline_text, task_type=task)
+                gold = batch["answers"][sample_idx].strip()
+                baseline_update.append(
+                    {
+                        "question_id": batch["question_ids"][sample_idx],
+                        "question": batch["questions"][sample_idx],
+                        "gold": gold,
+                        "prediction": pred,
+                        "generation": generation,
+                        "correct": pred.strip() == gold.strip(),
+                    }
+                )
+
+        gathered_baseline_updates = gather_sharded_objects(baseline_update, rank, world_size)
+        if not is_main_process(rank):
+            continue
+        for shard_updates in gathered_baseline_updates:
+            if shard_updates is None:
+                continue
+            for shard_update in shard_updates:
+                if shard_update["correct"]:
+                    baseline_correct += 1
+                baseline_total += 1
+                baseline_samples.append(shard_update)
+                _print_token_limit_warning(
+                    question_id=str(shard_update["question_id"]),
+                    question=shard_update["question"],
+                    prediction=shard_update["prediction"],
+                    generation=shard_update["generation"],
+                    max_new_tokens=generation_max_new_tokens,
+                )
+
+        baseline_acc = baseline_correct / baseline_total * 100 if baseline_total > 0 else 0.0
+        write_eval_snapshot(
+            eval_path=eval_path,
+            method="ours_trained_multi_agent",
+            task=task,
+            correct=correct,
+            total=total,
+            time_seconds=t_total,
+            avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+            avg_generated_tokens=(
+                sum(generated_token_counts) / len(generated_token_counts)
+            ) if generated_token_counts else None,
+            avg_tokens_per_second=(
+                (sum(generated_token_counts) / sum(sample_durations))
+                if sample_durations and sum(sample_durations) > 0
+                else None
+            ),
+            parameters=params,
+            world_size=world_size,
+            samples=results,
+            baseline_single_model={
+                "method": "single_model",
+                "metrics": {
+                    "accuracy": baseline_acc,
+                    "correct": baseline_correct,
+                    "total": baseline_total,
+                },
+                "parameters": {
+                    "generation_max_new_tokens": generation_max_new_tokens,
+                    "do_sample": False,
+                    "world_size": world_size,
+                },
+                "samples": baseline_samples,
+            },
+            comparison={
+                "baseline_accuracy": baseline_acc,
+                "improvement": accuracy - baseline_acc,
+            },
+        )
+
+    _close_progress_iterator(progress)
+    baseline_acc = baseline_correct / baseline_total * 100 if baseline_total > 0 else 0.0
+
+    print(f"\n{'='*60}")
+    print(f"  COMPARISON")
+    print(f"{'='*60}")
+    print(f"  Multi-agent (trained): {accuracy:.2f}%")
+    print(f"  Single model baseline: {baseline_acc:.2f}%")
+    print(f"  Improvement:           {accuracy - baseline_acc:+.2f}%")
+    print(f"{'='*60}")
+
+    write_eval_snapshot(
+        eval_path=eval_path,
+        method="ours_trained_multi_agent",
+        task=task,
+        correct=correct,
+        total=total,
+        time_seconds=t_total,
+        avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+        avg_generated_tokens=(
+            sum(generated_token_counts) / len(generated_token_counts)
+        ) if generated_token_counts else None,
+        avg_tokens_per_second=(
+            (sum(generated_token_counts) / sum(sample_durations))
+            if sample_durations and sum(sample_durations) > 0
+            else None
+        ),
+        parameters=params,
+        world_size=world_size,
+        samples=results,
+        baseline_single_model={
+            "method": "single_model",
+            "metrics": {
+                "accuracy": baseline_acc,
+                "correct": baseline_correct,
+                "total": baseline_total,
+            },
+            "parameters": {
+                "generation_max_new_tokens": generation_max_new_tokens,
+                "do_sample": False,
+                "world_size": world_size,
+            },
+            "samples": baseline_samples,
+        },
+        comparison={
+            "baseline_accuracy": baseline_acc,
+            "improvement": accuracy - baseline_acc,
+        },
+    )
+    result_payload["baseline_single_model"] = {
+        "method": "single_model",
+        "metrics": {
+            "accuracy": baseline_acc,
+            "correct": baseline_correct,
+            "total": baseline_total,
+        },
+        "parameters": {
+            "generation_max_new_tokens": generation_max_new_tokens,
+            "do_sample": False,
+            "world_size": world_size,
+        },
+        "samples": baseline_samples,
+    }
+    result_payload["comparison"] = {
+        "baseline_accuracy": baseline_acc,
+        "improvement": accuracy - baseline_acc,
     }
     return result_payload
 
@@ -1028,8 +1291,10 @@ def evaluate(
     max_steps = max(step_counts)
     dataloader_iter = iter(dataloader)
 
+    progress = _build_progress_iterator(max_steps, desc=f"Eval {task}", rank=rank)
+
     with torch.no_grad():
-        for idx in range(max_steps):
+        for idx in progress:
             batch = None
             local_update = None
             t0 = time.time()
@@ -1119,6 +1384,13 @@ def evaluate(
                     if write_agent_logs and shard_update["agent_log"] is not None:
                         agent_log_results.append(shard_update["agent_log"])
                     results.append(sample_result)
+                    _print_token_limit_warning(
+                        question_id=str(shard_update["question_id"]),
+                        question=shard_update["question"],
+                        prediction=shard_update["prediction"],
+                        generation=shard_update["generation"],
+                        max_new_tokens=generation_max_new_tokens,
+                    )
 
             write_eval_snapshot(
                 eval_path=eval_path,
@@ -1188,6 +1460,7 @@ def evaluate(
                 print(f"    Gold: {latest['gold']}")
                 print(f"    Pred: {latest['prediction']}")
                 print(f"    Gen:  {latest['generation'].get('generated_text', '')[:200]}")
+    _close_progress_iterator(progress)
 
     if not is_main_process(rank):
         if is_dist:
@@ -1273,7 +1546,8 @@ def evaluate(
     baseline_samples = []
 
     dataloader_iter = iter(dataloader)
-    for idx in range(max_steps):
+    progress = _build_progress_iterator(max_steps, desc="Baseline", rank=rank)
+    for idx in progress:
         baseline_update = None
         if idx < local_steps:
             batch = next(dataloader_iter)
@@ -1293,37 +1567,51 @@ def evaluate(
                 return_dict_in_generate=True,
             )
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
-            generated_token_ids = sequences[0][task_ids.shape[1]:].tolist()
-            baseline_text = system.base_model.tokenizer.decode(
-                generated_token_ids, skip_special_tokens=True,
-            )
-            generation = build_generation_metadata(
-                generated_token_ids=generated_token_ids,
-                eos_token_id=system.base_model.tokenizer.eos_token_id,
-                max_new_tokens=generation_max_new_tokens,
-            )
+            batch_size_actual = task_ids.shape[0]
+            baseline_update = []
+            for sample_idx in range(batch_size_actual):
+                generated_token_ids = sequences[sample_idx][task_ids.shape[1]:].tolist()
+                baseline_text = system.base_model.tokenizer.decode(
+                    generated_token_ids,
+                    skip_special_tokens=True,
+                )
+                generation = build_generation_metadata(
+                    generated_token_ids=generated_token_ids,
+                    eos_token_id=system.base_model.tokenizer.eos_token_id,
+                    max_new_tokens=generation_max_new_tokens,
+                )
 
-            pred = extract_answer(baseline_text, task_type=task)
-            gold = batch["answers"][0].strip()
-            baseline_update = {
-                "question_id": batch["question_ids"][0],
-                "question": batch["questions"][0],
-                "gold": gold,
-                "prediction": pred,
-                "generation": generation,
-                "correct": pred.strip() == gold.strip(),
-            }
+                pred = extract_answer(baseline_text, task_type=task)
+                gold = batch["answers"][sample_idx].strip()
+                baseline_update.append(
+                    {
+                        "question_id": batch["question_ids"][sample_idx],
+                        "question": batch["questions"][sample_idx],
+                        "gold": gold,
+                        "prediction": pred,
+                        "generation": generation,
+                        "correct": pred.strip() == gold.strip(),
+                    }
+                )
 
         gathered_baseline_updates = gather_sharded_objects(baseline_update, rank, world_size)
         if not is_main_process(rank):
             continue
-        for shard_update in gathered_baseline_updates:
-            if shard_update is None:
+        for shard_updates in gathered_baseline_updates:
+            if shard_updates is None:
                 continue
-            if shard_update["correct"]:
-                baseline_correct += 1
-            baseline_total += 1
-            baseline_samples.append(shard_update)
+            for shard_update in shard_updates:
+                if shard_update["correct"]:
+                    baseline_correct += 1
+                baseline_total += 1
+                baseline_samples.append(shard_update)
+                _print_token_limit_warning(
+                    question_id=str(shard_update["question_id"]),
+                    question=shard_update["question"],
+                    prediction=shard_update["prediction"],
+                    generation=shard_update["generation"],
+                    max_new_tokens=generation_max_new_tokens,
+                )
 
         baseline_acc = baseline_correct / baseline_total * 100 if baseline_total > 0 else 0.0
         write_eval_snapshot(
@@ -1378,6 +1666,7 @@ def evaluate(
 
         if baseline_total > 0 and (baseline_total % 50) == 0:
             print(f"  [{baseline_total}/{len(full_dataset)}] Baseline Acc: {baseline_acc:.1f}%")
+    _close_progress_iterator(progress)
 
     baseline_acc = baseline_correct / baseline_total * 100 if baseline_total > 0 else 0.0
 

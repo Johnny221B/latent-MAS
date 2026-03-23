@@ -98,6 +98,29 @@ def test_load_config_defaults_training_shuffle_to_true(tmp_path: Path):
     assert loaded["training"]["shuffle"] is True
 
 
+def test_load_config_defaults_training_seed_and_probe_degeneracy_ratio(tmp_path: Path):
+    graph_path = _write_minimal_graph(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"name": "dummy"},
+                "graph": {"config": str(graph_path)},
+                "training": {
+                    "task": "gsm8k",
+                    "batch_size": 32,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path)
+
+    assert loaded["training"]["seed"] == 42
+    assert loaded["training_probe"]["degenerate_max_new_tokens_ratio"] == 0.5
+
+
 def test_probe64_configs_disable_final_checkpoint_and_enable_live_eval():
     repo_root = Path(__file__).resolve().parent.parent
     config_paths = [

@@ -14,11 +14,13 @@ Specific GPUs:
 import argparse
 import copy
 import os
+import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
 import csv
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 import random
 
@@ -101,6 +103,122 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+def set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    if np is not None:
+        np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def _run_git_command(args: list[str], *, repo_root: Path | None = None) -> list[str]:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo_root or project_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+    return [line.rstrip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def collect_git_provenance(repo_root: Path | None = None) -> dict:
+    repo_root = repo_root or project_root
+    commit = _run_git_command(["rev-parse", "HEAD"], repo_root=repo_root)
+    branch = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], repo_root=repo_root)
+    status_short = _run_git_command(["status", "--short"], repo_root=repo_root)
+    diff_stat = _run_git_command(["diff", "--stat", "HEAD"], repo_root=repo_root)
+    return {
+        "commit": commit[0] if commit else None,
+        "branch": branch[0] if branch else None,
+        "status_short": status_short,
+        "diff_stat": diff_stat,
+        "is_dirty": bool(status_short),
+    }
+
+
+def build_run_provenance(
+    *,
+    config_path: str,
+    output_dir: str | Path,
+    training_seed: int,
+    world_size: int,
+    rank: int,
+    is_ddp: bool,
+    argv: list[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> dict:
+    runtime_env = env or os.environ
+    captured_env = {
+        key: runtime_env[key]
+        for key in [
+            "CUDA_VISIBLE_DEVICES",
+            "LOCAL_RANK",
+            "RANK",
+            "WORLD_SIZE",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+        ]
+        if key in runtime_env
+    }
+    return {
+        "captured_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "output_dir": str(output_dir),
+        "config_path": str(config_path),
+        "cwd": str(Path.cwd()),
+        "hostname": socket.gethostname(),
+        "training": {
+            "seed": int(training_seed),
+            "is_ddp": bool(is_ddp),
+        },
+        "launch": {
+            "argv": list(argv) if argv is not None else list(sys.argv),
+            "rank": int(rank),
+            "world_size": int(world_size),
+            "environment": captured_env,
+        },
+        "git": collect_git_provenance(),
+    }
+
+
+def summarize_probe_generation_health(
+    samples: list[dict],
+    *,
+    max_new_tokens: int,
+    degeneracy_ratio: float,
+) -> dict:
+    total = len(samples)
+    max_token_hits = 0
+    for sample in samples:
+        generation = sample.get("generation", {})
+        finish_reason = generation.get("finish_reason")
+        generated_token_count = generation.get("generated_token_count")
+        if finish_reason == "max_new_tokens":
+            max_token_hits += 1
+            continue
+        if generated_token_count is not None and int(generated_token_count) >= int(max_new_tokens):
+            max_token_hits += 1
+    ratio = (max_token_hits / total) if total > 0 else 0.0
+    return {
+        "max_new_tokens_count": max_token_hits,
+        "max_new_tokens_ratio": ratio,
+        "degenerate": total > 0 and ratio >= float(degeneracy_ratio),
+    }
+
+
 def resolve_post_train_eval_plan(evaluation_cfg: dict) -> list[tuple[str, int | None]]:
     split_names = evaluation_cfg.get("splits_after_train", ["train", "test"])
     eval_plan = []
@@ -153,6 +271,7 @@ def evaluate_training_probe(
     inference_mode: str,
     use_terminal_prefix: bool,
     write_agent_logs: bool,
+    degeneracy_ratio: float,
 ):
     if dataset is None:
         return None
@@ -229,6 +348,11 @@ def evaluate_training_probe(
         for sample in merged_results
     ]
     accuracy = correct / total * 100 if total > 0 else 0.0
+    generation_health = summarize_probe_generation_health(
+        merged_results,
+        max_new_tokens=max_new_tokens,
+        degeneracy_ratio=degeneracy_ratio,
+    )
     return {
         "metrics": {
             "accuracy": accuracy,
@@ -239,6 +363,7 @@ def evaluate_training_probe(
             "avg_generated_tokens": (
                 sum(generated_token_counts) / len(generated_token_counts)
             ) if generated_token_counts else None,
+            **generation_health,
         },
         "samples": merged_results,
     }
@@ -275,11 +400,13 @@ def train(config_path: str, max_samples: int | None = None):
     evaluation_cfg = config.get("evaluation", {})
     probe_cfg = config.get("training_probe", {})
     training_input_mode = training_cfg.get("input_mode", "legacy_plain_with_prefix")
+    training_seed = int(training_cfg.get("seed", 42))
 
     # ── Setup device ──
     device, is_ddp = setup_distributed()
     world_size = dist.get_world_size() if is_ddp else 1
     rank = dist.get_rank() if is_ddp else 0
+    set_global_seed(training_seed)
 
     # ── Build system (each process loads its own copy) ──
     if is_main_process():
@@ -344,7 +471,15 @@ def train(config_path: str, max_samples: int | None = None):
     )
 
     # DistributedSampler splits data across GPUs
-    sampler = DistributedSampler(dataset, shuffle=train_shuffle) if is_ddp else None
+    sampler = (
+        DistributedSampler(dataset, shuffle=train_shuffle, seed=training_seed)
+        if is_ddp
+        else None
+    )
+    dataloader_generator = None
+    if sampler is None and train_shuffle:
+        dataloader_generator = torch.Generator()
+        dataloader_generator.manual_seed(training_seed)
     dataloader = DataLoader(
         dataset,
         batch_size=training_cfg["batch_size"],  # per-GPU batch size
@@ -352,12 +487,14 @@ def train(config_path: str, max_samples: int | None = None):
         sampler=sampler,
         collate_fn=collate_fn,
         drop_last=drop_last,
+        generator=dataloader_generator,
     )
 
     if is_main_process():
         print(f"Dataset size: {len(dataset)}")
         if probe_dataset is not None:
             print(f"Probe samples held out: {len(probe_dataset)}")
+        print(f"Training seed: {training_seed}")
         print(f"Per-GPU batch size: {training_cfg['batch_size']}")
         print(f"Effective batch size: {training_cfg['batch_size'] * world_size}")
         print(f"Batches per epoch per GPU: {len(dataloader)}")
@@ -391,6 +528,15 @@ def train(config_path: str, max_samples: int | None = None):
         import yaml
         with open(output_dir / "config.yaml", "w") as f:
             yaml.dump(config, f, default_flow_style=False)
+        run_provenance = build_run_provenance(
+            config_path=config_path,
+            output_dir=output_dir,
+            training_seed=training_seed,
+            world_size=world_size,
+            rank=rank,
+            is_ddp=is_ddp,
+        )
+        write_probe_history_json(output_dir / "run_provenance.json", run_provenance)
         print(f"  Output dir: {output_dir}")
 
     wandb_run = init_wandb_run(config=config, output_dir=output_dir, rank=rank)
@@ -516,6 +662,7 @@ def train(config_path: str, max_samples: int | None = None):
                         inference_mode=evaluation_cfg.get("inference_mode", "chat_with_prefix"),
                         use_terminal_prefix=evaluation_cfg.get("use_terminal_prefix", True),
                         write_agent_logs=bool(probe_cfg.get("write_agent_logs", False)),
+                        degeneracy_ratio=float(probe_cfg.get("degenerate_max_new_tokens_ratio", 0.5)),
                     )
                 if is_main_process() and probe_result is not None:
                     probe_record = {
@@ -530,14 +677,23 @@ def train(config_path: str, max_samples: int | None = None):
                         f"  Probe@{global_step} | "
                         f"Acc:{probe_result['metrics']['accuracy']:.2f}% "
                         f"({probe_result['metrics']['correct']}/{probe_result['metrics']['total']}) | "
+                        f"max-token:{probe_result['metrics']['max_new_tokens_ratio']:.2%} | "
                         f"time:{probe_result['metrics']['time_seconds']:.1f}s"
                     )
+                    if probe_result["metrics"]["degenerate"]:
+                        print(
+                            "  Probe warning: generation is hitting max_new_tokens too often; "
+                            "this run may be degenerate."
+                        )
                     probe_payload = {
                         "probe/accuracy": probe_result["metrics"]["accuracy"],
                         "probe/correct": probe_result["metrics"]["correct"],
                         "probe/total": probe_result["metrics"]["total"],
                         "probe/time_seconds": probe_result["metrics"]["time_seconds"],
                         "probe/avg_sample_seconds": probe_result["metrics"]["avg_sample_seconds"],
+                        "probe/max_new_tokens_count": probe_result["metrics"]["max_new_tokens_count"],
+                        "probe/max_new_tokens_ratio": probe_result["metrics"]["max_new_tokens_ratio"],
+                        "probe/degenerate": int(probe_result["metrics"]["degenerate"]),
                     }
                     table = maybe_build_probe_wandb_table(wandb_run, probe_result["samples"])
                     if table is not None:
