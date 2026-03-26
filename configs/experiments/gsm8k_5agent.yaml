@@ -1,5 +1,5 @@
 model:
-  name: "Qwen/Qwen3-8B"
+  name: "Qwen/Qwen3-4B"
   frozen: true
 
 graph:
@@ -7,7 +7,7 @@ graph:
   roles_dir: "configs/roles"
 
 compressor:
-  num_queries: 16        # Lp: output prefix length
+  num_queries: 40        # Lp: output prefix length
   num_heads: 8           # attention heads in cross-attn
   dropout: 0.1
 
@@ -17,21 +17,21 @@ training:
   batch_size: 32
   lr: 0.0005
   weight_decay: 0.01
-  epochs: 1
-  max_seq_len: 16384
-  lambda_add: 0.1         # penalty for adding edges not in prior
-  lambda_drop: 0.005      # penalty for dropping edges in prior
+  epochs: 5
+  max_seq_len: 4096
+  lambda_add: 0.0         # penalty for adding edges not in prior
+  lambda_drop: 0.000      # penalty for dropping edges in prior
   lambda_sparse: 0.005    # penalty for sparsity of edges
   gradient_accumulation_steps: 1
   log_interval: 1
   save_interval: 1000
 
 reasoning:
-  steps_per_agent: 25       # total generation tokens per agent
-  compress_last_k: 25       # only compress last k hidden states
+  steps_per_agent: 40       # total generation tokens per agent
+  compress_last_k: 40       # only compress last k hidden states
 
 output:
-  dir: "outputs/gsm8k_qwen3-8b"
+  dir: "outputs/gsm8k_qwen3-4b"
   log_dir: "logs"
 
 report:

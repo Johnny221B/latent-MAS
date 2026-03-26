@@ -47,3 +47,4 @@ wandb/
 
 .env
 LatentMAS/
+data/

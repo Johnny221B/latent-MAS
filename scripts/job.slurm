@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train
+#SBATCH --job-name=evaluate
 #SBATCH --partition=hpg-b200
 #SBATCH --nodes=1
 #SBATCH --gpus=2
@@ -10,4 +10,4 @@
 #SBATCH --time=24:00:00
 
 cd /home/chengzhi.ucsb/code/toby/latent-MAS
-bash scripts/train.sh
+bash scripts/evaluate.sh

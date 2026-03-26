@@ -25,7 +25,7 @@ class Agent:
         agent_id: int,
         role_config: dict,
         base_model: BaseModelWrapper,
-        max_seq_len: int = 512,
+        max_seq_len: int = 2048,
     ):
         """
         Args:
@@ -41,7 +41,7 @@ class Agent:
         self.role_config = role_config
         self.role_name = role_config["role_name"]
         self.system_prompt = role_config["system_prompt"]
-        self.reasoning_steps = role_config.get("reasoning_steps", 256)
+        self.reasoning_steps = role_config.get("reasoning_steps", 40)
         self.base_model = base_model
         self.max_seq_len = max_seq_len
         self.compress_last_k = role_config.get("compress_last_k", 40)
@@ -398,7 +398,7 @@ class Agent:
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
         upstream_texts: list[list[str]] | None = None,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 2048,
         temperature: float = 0.6,
         top_p: float = 0.95,
         do_sample: bool = True,
