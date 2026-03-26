@@ -186,6 +186,26 @@ def test_competition_math_experiment_configs_use_probe_monitoring():
     assert debug_loaded["report"]["use_wandb"] is False
 
 
+def test_am_deepseek_r1_distilled_experiment_config_matches_competition_math_shape():
+    repo_root = Path(__file__).resolve().parent.parent
+    config_path = repo_root / "configs/experiments/am_deepseek_r1_distilled_5agent.yaml"
+
+    loaded = load_config(config_path)
+
+    assert loaded["training"]["task"] == "am_deepseek_r1_distilled"
+    assert loaded["training"]["train_strategy"] == "communication_only"
+    assert loaded["training"]["input_mode"] == "chat_with_prefix"
+    assert loaded["training"]["batch_size"] == 4
+    assert loaded["training"]["max_seq_len"] == 8192
+    assert loaded["training_probe"]["enabled"] is True
+    assert loaded["training_probe"]["samples"] == 0
+    assert loaded["evaluation"]["run_after_train"] is False
+    assert loaded["model"]["name"] == "Qwen/Qwen3-4B"
+    assert loaded["model"]["dtype"] == "bfloat16"
+    assert loaded["output"]["dir"] == "outputs/am_deepseek_r1_distilled_qwen3-4b"
+    assert loaded["report"]["use_wandb"] is True
+
+
 def test_qwen3_4b_smoke_configs_are_small_and_disable_wandb():
     repo_root = Path(__file__).resolve().parent.parent
     config_paths = [

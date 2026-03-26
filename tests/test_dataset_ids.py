@@ -1,5 +1,6 @@
 """Tests for dataset question ids."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -14,7 +15,14 @@ from src.data import get_task_configs
 def test_dataset_factory_registry_contains_supported_tasks():
     task_configs = get_task_configs()
 
-    assert {"gsm8k", "arc_easy", "arc_challenge", "humaneval", "competition_math"} <= set(task_configs)
+    assert {
+        "gsm8k",
+        "arc_easy",
+        "arc_challenge",
+        "humaneval",
+        "competition_math",
+        "am_deepseek_r1_distilled",
+    } <= set(task_configs)
 
 
 def test_dataset_returns_question_id_from_raw_record():
@@ -232,6 +240,88 @@ def test_competition_math_dataset_uses_full_solution_as_training_target(monkeypa
     assert sample["answer"] == "We get 42, so the final answer is \\boxed{42}."
     assert sample["level"] == "Level 1"
     assert sample["type"] == "algebra"
+
+
+def test_am_deepseek_r1_distilled_dataset_loads_from_local_jsonl(tmp_path, monkeypatch):
+    from src.data import am_deepseek_r1_distilled as dataset_module
+
+    data_dir = tmp_path / "data" / "am_deepseek_r1_distilled"
+    data_dir.mkdir(parents=True)
+    train_path = data_dir / "train.jsonl"
+    train_path.write_text(
+        json.dumps(
+            {
+                "question_id": "am-r1-local-1",
+                "question": "Solve 3+3.",
+                "answer": "<think>3+3=6</think><answer>6</answer>",
+                "subset": "am_0.5M",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dataset_module, "LOCAL_DATA_DIR", data_dir, raising=False)
+
+    dataset = MultiAgentDataset(task="am_deepseek_r1_distilled", split="train")
+    sample = dataset[0]
+
+    assert len(dataset) == 1
+    assert sample["question_id"] == "am-r1-local-1"
+    assert sample["question"] == "Solve 3+3."
+    assert sample["answer"] == "<think>3+3=6</think><answer>6</answer>"
+    assert sample["subset"] == "am_0.5M"
+    assert not (data_dir / ".hf_cache").exists()
+
+
+def test_am_deepseek_r1_distilled_dataset_requires_local_prepared_file(tmp_path, monkeypatch):
+    from src.data import am_deepseek_r1_distilled as dataset_module
+
+    data_dir = tmp_path / "missing_data_dir"
+    monkeypatch.setattr(dataset_module, "LOCAL_DATA_DIR", data_dir, raising=False)
+
+    with pytest.raises(FileNotFoundError, match="prepare_am_deepseek_r1_distilled.py"):
+        MultiAgentDataset(task="am_deepseek_r1_distilled", split="train")
+
+
+def test_am_deepseek_r1_distilled_dataset_honors_max_samples_without_cache(tmp_path, monkeypatch):
+    from src.data import am_deepseek_r1_distilled as dataset_module
+
+    data_dir = tmp_path / "data" / "am_deepseek_r1_distilled"
+    data_dir.mkdir(parents=True)
+    train_path = data_dir / "train.jsonl"
+    train_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "question_id": "am-r1-local-1",
+                        "question": "Solve 1+1.",
+                        "answer": "<think>1+1=2</think><answer>2</answer>",
+                        "subset": "am_0.5M",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "question_id": "am-r1-local-2",
+                        "question": "Solve 2+2.",
+                        "answer": "<think>2+2=4</think><answer>4</answer>",
+                        "subset": "am_0.9M",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dataset_module, "LOCAL_DATA_DIR", data_dir, raising=False)
+
+    dataset = MultiAgentDataset(task="am_deepseek_r1_distilled", split="train", max_samples=1)
+
+    assert len(dataset) == 1
+    assert dataset[0]["question_id"] == "am-r1-local-1"
+    assert not (data_dir / ".hf_cache").exists()
 
 
 def test_dataset_falls_back_to_stable_question_id_when_missing_field():

@@ -34,7 +34,7 @@ $$
 
 ## 2. 数据定义
 
-数据处理逻辑定义在 [factory.py](../src/data/factory.py) 与 [base.py](../src/data/base.py)，具体数据集逻辑按任务拆分在 [gsm8k.py](../src/data/gsm8k.py)、[arc.py](../src/data/arc.py)、[competition_math.py](../src/data/competition_math.py)、[humaneval.py](../src/data/humaneval.py)。
+数据处理逻辑定义在 [factory.py](../src/data/factory.py) 与 [base.py](../src/data/base.py)，具体数据集逻辑按任务拆分在 [gsm8k.py](../src/data/gsm8k.py)、[arc.py](../src/data/arc.py)、[competition_math.py](../src/data/competition_math.py)、[humaneval.py](../src/data/humaneval.py)、[am_deepseek_r1_distilled.py](../src/data/am_deepseek_r1_distilled.py)。
 
 ### 2.1 当前支持的数据集
 
@@ -45,6 +45,7 @@ $$
 - `arc_challenge`
 - `humaneval`
 - `competition_math`
+- `am_deepseek_r1_distilled`
 
 这些任务在代码中被统一成相同的数据接口，每条样本最终都被处理为：
 
@@ -107,6 +108,27 @@ B. ...
 
 其中训练监督直接使用完整 `solution` 文本。评测与训练期 probe 则仍会从模型生成文本中抽取最终答案，抽取时优先匹配 `\boxed{...}`，其次兼容 `final answer is ...` 这类尾部答案表达。当前不会做数学表达式的符号等价判定，相关准确率仍然基于规范化后的字符串 exact-match。
 
+`am_deepseek_r1_distilled` 是当前新增的 assistant 全输出监督任务。它来自 Hugging Face 数据集 `a-m-team/AM-DeepSeek-R1-Distilled-1.4M`，但当前训练阶段不会直接在线读取 Hugging Face。当前实现要求先运行 `scripts/prepare_am_deepseek_r1_distilled.py`，把 `am_0.5M` 与 `am_0.9M` 两个 subset 规范化写到本地 `data/am_deepseek_r1_distilled/train.jsonl`，然后训练 dataloader 再从该本地文件直接读取。这里已经不再调用 `datasets.load_dataset("json", ...)`，而是使用仓库内置的本地 JSONL random-access 读取器，因此不应再生成 `.hf_cache`，也不应再看到 `Generating train split` 这类 Hugging Face 建表日志。每条样本会被整理成：
+
+```text
+{
+  "question_id": "am-r1-<hash>",
+  "question": user_content,
+  "answer": assistant_content,
+  "subset": ...
+}
+```
+
+其中：
+
+- `question` 取自 `messages` 中 `role == "user"` 的文本
+- `answer` 取自 `messages` 中 `role == "assistant"` 的完整文本
+- 训练监督会直接使用完整 assistant 输出，其中保留 `<think>...</think><answer>...</answer>` 标签
+- 当前不会把监督目标裁成单独的 `answer_content`
+- 当前也不提供正式 `test` split；若需要训练走势观测，应继续使用 `training_probe`
+- 若本地 `train.jsonl` 文件缺失，训练会在 dataset 加载阶段直接报错，并提示先运行预处理脚本
+- `--max_samples` 仍然在 dataset 层通过 `select()` 截断本地样本，但不会触发额外的 Hugging Face 缓存构建
+
 ### 2.2 训练批次的输入形式
 
 在 dataloader 经过 `collate_fn` 后，一个 batch 的原始内容为：
@@ -138,6 +160,8 @@ B. ...
 当前默认实验配置 [gsm8k_5agent.yaml](../configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
 
 `competition_math` 也沿用这一路径；不同之处只在于监督答案是完整 `solution` 文本，而不是 GSM8K 的 `####` 段落或抽取后的单个最终答案字符串。
+
+`am_deepseek_r1_distilled` 同样沿用这一路径；不同之处在于监督答案不是“最终答案字符串”，而是 assistant 的整段输出，也就是带 `<think>` 与 `<answer>` 标签的完整响应文本。
 
 对 ARC 而言，这里的 `question` 已经是“原题 + Choices”拼接后的文本；chat template 不会再单独处理结构化 `choices` 字段。
 

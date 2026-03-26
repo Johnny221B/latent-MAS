@@ -9,6 +9,7 @@
 - `arc_challenge`
 - `humaneval`
 - `competition_math`
+- `am_deepseek_r1_distilled`
 
 ## Files
 
@@ -16,6 +17,7 @@
 - `arc.md`
 - `humaneval.md`
 - `competition_math.md`
+- `am_deepseek_r1_distilled.md`
 
 ## Common Entry Points
 
@@ -39,6 +41,7 @@ src/data/
 
 当前已提供的现成实验 YAML：
 
+- `configs/experiments/am_deepseek_r1_distilled_5agent.yaml`
 - `configs/experiments/arc_easy_5agent.yaml`
 - `configs/experiments/arc_challenge_5agent.yaml`
 - `configs/experiments/humaneval_5agent.yaml`

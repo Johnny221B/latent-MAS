@@ -19,6 +19,7 @@
 - `docs/data/arc.md`
 - `docs/data/humaneval.md`
 - `docs/data/competition_math.md`
+- `docs/data/am_deepseek_r1_distilled.md`
 
 当前数据模块源码位于 `src/data/`，并按数据集拆分为独立模块，不再使用根目录 `data/` 包。
 
@@ -51,3 +52,15 @@
 - 调试配置 [`competition_math_5agent_debug.yaml`](./../configs/experiments/competition_math_5agent_debug.yaml) 将 `training_probe.samples` 设为 `100`，用于训练期间的 probe 监控
 - 若启用 probe，`probe` 不参与梯度更新，训练过程中按 `global_step` 记录 `probe accuracy`
 - 调试配置默认禁用 W&B；正式配置才会上报线上 run
+
+## Current AM DeepSeek R1 Distilled Status
+
+当前仓库已支持 `am_deepseek_r1_distilled` 训练接入：
+
+- 数据源为 `a-m-team/AM-DeepSeek-R1-Distilled-1.4M`
+- 运行时会合并 `am_0.5M` 与 `am_0.9M`
+- 当前只支持 `train` split
+- 训练监督目标是 assistant 的完整输出，保留 `<think>` 和 `<answer>` 标签
+- 当前需要先运行 `scripts/prepare_am_deepseek_r1_distilled.py` 生成本地 `train.jsonl`，再启动训练
+- 正式实验配置为 [`am_deepseek_r1_distilled_5agent.yaml`](./../configs/experiments/am_deepseek_r1_distilled_5agent.yaml)，当前模型名与输出目录对应 `Qwen/Qwen3-4B`
+- 若需要训练期间监控，应使用已有 `training_probe` 机制，而不是依赖数据集自带评测切分
