@@ -27,6 +27,12 @@
 
 `docs/plans/` 保存面向实现的设计稿和实施计划，不是当前运行行为的最终来源。
 
+当前新增计划文档：
+
+- `docs/plans/2026-03-26-am-deepseek-r1-source-filter-design.md`
+- `docs/plans/2026-03-26-am-deepseek-r1-source-filter-implementation.md`
+- `docs/plans/2026-03-27-resume-training-from-checkpoint.md`
+
 ## Records
 
 当前仓库里尚未单独建立 `docs/records/` 目录；历史变更记录、实验日志、问题追踪仍分散在 `docs/` 根目录下。后续若继续积累，应优先迁移到 `docs/records/`，避免它们和主文档混淆。
@@ -63,4 +69,5 @@
 - 训练监督目标是 assistant 的完整输出，保留 `<think>` 和 `<answer>` 标签
 - 当前需要先运行 `scripts/prepare_am_deepseek_r1_distilled.py` 生成本地 `train.jsonl`，再启动训练
 - 正式实验配置为 [`am_deepseek_r1_distilled_5agent.yaml`](./../configs/experiments/am_deepseek_r1_distilled_5agent.yaml)，当前模型名与输出目录对应 `Qwen/Qwen3-4B`
+- 该实验配置当前显式暴露 `training.resume_from_checkpoint`；若设置为某个 `checkpoint_step*.pt`，训练会从该 checkpoint 恢复，并继续写回原 run 目录
 - 若需要训练期间监控，应使用已有 `training_probe` 机制，而不是依赖数据集自带评测切分

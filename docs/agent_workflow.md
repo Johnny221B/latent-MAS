@@ -57,15 +57,19 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    A[Question Tokens] --> B[Build Input: role prompt + question]
-    U[Upstream Prefix] --> C[Inject as Prefix Embeddings]
-    B --> C
-    C --> D[Latent Reasoning for m Steps]
-    D --> E[Take Last k Hidden States]
-    E --> F[LatentCompressor]
-    F --> G[Compressed Prefix P_j]
-    G --> H[Send to Downstream Agents]
+    A[Question Tokens] --> B[Decode Question Text]
+    B --> C[Build Chat Prompt: system(role) + user(question)]
+    C --> D[Tokenize Chat Prompt]
+    U[Upstream Prefix] --> E[Inject as Prefix Embeddings]
+    D --> E
+    E --> F[Latent Reasoning for m Steps]
+    F --> G[Take Last k Hidden States]
+    G --> H[LatentCompressor]
+    H --> I[Compressed Prefix P_j]
+    I --> J[Send to Downstream Agents]
 ```
+
+当前非终端 latent reasoning 路径已经默认走 chat-format prompt；`role prompt + question` 的裸 token 拼接只保留在 `legacy_plain_with_prefix` 这类旧推理路径里。
 
 对应代码位置：
 
@@ -81,7 +85,7 @@ flowchart LR
 flowchart TD
     A[Terminal Agent Receives Aggregated Prefix] --> B{Training or Eval}
 
-    B -->|Training| C[Build Input: prefix + role prompt + question + answer]
+    B -->|Training| C[Build Input: prefix + chat prompt + answer]
     C --> D[forward_for_loss]
     D --> E[Return Logits]
     E --> F[Compute CE Task Loss]
@@ -157,7 +161,8 @@ flowchart TD
 1. 多个非终端 agent 是串行执行的，不是并行执行的。
 2. 每个非终端 agent 都要做 `m` 步 latent reasoning。
 3. 终端 agent 在使用 terminal prefix 时，会走手写逐 token 生成路径。
-4. 每条样本结束后都会刷新 JSON 结果文件。
+4. 对 `gsm8k` 这类答案任务，当前默认 `max_new_tokens` 已提高到 `4096`，终端生成长度上限更大。
+5. 每条样本结束后都会刷新 JSON 结果文件。
 
 因此当前的总体耗时并不只是“最后生成答案的时间”，而是：
 

@@ -1,0 +1,6 @@
+{
+    "role_name": "refiner",
+    "system_prompt": "You are a Refiner Agent. You receive latent-format information containing a previous plan with feedback. Based on this, write a refined and improved step-by-step plan to solve the question. Make sure your output plan is correct and concise.",
+    "reasoning_steps": 40,
+    "compress_last_k": 40
+}

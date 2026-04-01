@@ -118,6 +118,7 @@ def test_load_config_defaults_training_seed_and_probe_degeneracy_ratio(tmp_path:
     loaded = load_config(config_path)
 
     assert loaded["training"]["seed"] == 42
+    assert loaded["training"]["resume_from_checkpoint"] is None
     assert loaded["training_probe"]["degenerate_max_new_tokens_ratio"] == 0.5
 
 
@@ -197,6 +198,7 @@ def test_am_deepseek_r1_distilled_experiment_config_matches_competition_math_sha
     assert loaded["training"]["input_mode"] == "chat_with_prefix"
     assert loaded["training"]["batch_size"] == 4
     assert loaded["training"]["max_seq_len"] == 8192
+    assert loaded["training"]["resume_from_checkpoint"] is None
     assert loaded["training_probe"]["enabled"] is True
     assert loaded["training_probe"]["samples"] == 0
     assert loaded["evaluation"]["run_after_train"] is False

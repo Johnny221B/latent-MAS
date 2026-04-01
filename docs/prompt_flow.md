@@ -18,15 +18,16 @@
 - [solver.json](../configs/roles/solver.json)
 - [summarizer.json](../configs/roles/summarizer.json)
 - [critic.json](../configs/roles/critic.json)
+- [refiner.json](../configs/roles/refiner.json)
 
 这些文件的结构基本一致，例如：
 
 ```json
 {
   "role_name": "planner",
-  "system_prompt": "You are a planning agent. Analyze the problem and break it down into clear, logical steps. Identify what information is needed and outline a solution strategy.",
-  "reasoning_steps": 25,
-  "compress_last_k": 25
+  "system_prompt": "You are a Planner Agent. Given an input question, design a clear, step-by-step plan for how to solve the question. Your outlined plan should be concise with a few bullet points for each step. Do not produce the final answer.",
+  "reasoning_steps": 40,
+  "compress_last_k": 40
 }
 ```
 
@@ -45,8 +46,10 @@ prompt 内容和执行顺序是分开定义的。
 
 当前图配置包括：
 
-- [3agent_sequential.json](../configs/graphs/3agent_sequential.json)
-- [5agent_fan_in.json](../configs/graphs/5agent_fan_in.json)
+- [default_3agent.json](../configs/graphs/default_3agent.json)
+- [reordered_3agent_single_terminal.json](../configs/graphs/reordered_3agent_single_terminal.json)
+- [default_5agent.json](../configs/graphs/default_5agent.json)
+- [chain_4agent.json](../configs/graphs/chain_4agent.json)
 
 例如三智能体顺序图中：
 
@@ -99,8 +102,8 @@ prompt 内容和执行顺序是分开定义的。
 关键字段与函数如下：
 
 - `self.system_prompt = role_config["system_prompt"]`
-- `_get_role_token_ids()`
-- `build_input_ids()`
+- `build_chat_prompt_text()`
+- `_build_generation_inputs()`
 - `forward_for_loss()`
 - `generate_answer()`
 
@@ -108,27 +111,27 @@ prompt 内容和执行顺序是分开定义的。
 
 ### 5.1 role prompt 的 tokenization
 
-`_get_role_token_ids()` 会把 `system_prompt` tokenize，并缓存成 `self._role_tokens`。
+在 legacy/plain 路径下，`_get_role_token_ids()` 会把 `system_prompt` tokenize，并缓存成 `self._role_tokens`。
 
-也就是说，每个 agent 的角色 prompt 只需要分词一次，之后可以重复使用。
+而在当前默认的 chat 路径下，`system_prompt` 会先参与构造 `system/user` 消息结构，再整体走 tokenizer 的 chat template。
 
 ### 5.2 非终端 agent 的输入格式
 
-对非终端 agent 而言，输入由两部分构成：
+对非终端 agent 而言，当前默认输入不是简单的 role token 与 question token 直接拼接，而是先构造成 chat prompt：
 
 $$
-\text{input}^{(i)} = [p_i ; x]
+\text{prompt}^{(i)} = \mathrm{Chat}(p_i, x)
 $$
 
 其中：
 
-- $p_i$ 表示第 $i$ 个 agent 的 role prompt token 序列
-- $x$ 表示原始问题 token 序列
+- $p_i$ 表示第 $i$ 个 agent 的 system prompt
+- $x$ 表示原始问题文本
 
-对应代码是 `build_input_ids()`：
+运行时会先把 `task_token_ids` decode 回文本，再通过 `build_chat_prompt_text()` 调用 tokenizer 的 chat template 生成 prompt 文本，并重新 tokenize。
 
 $$
-\texttt{input\_ids} = \texttt{concat}(\texttt{role\_ids}, \texttt{task\_token\_ids})
+\texttt{input\_ids} = \mathrm{Tok}(\mathrm{Chat}(p_i, x))
 $$
 
 如果该 agent 还有来自上游的 latent prefix，那么这个 prefix 不会以文本 token 的形式拼接，而是作为 embedding 前缀 `upstream_prefix` 注入模型。
@@ -136,14 +139,16 @@ $$
 因此更准确的输入可写为：
 
 $$
-\text{model input}^{(i)} = [z_i ; p_i ; x]
+\text{model input}^{(i)} = [z_i ; \mathrm{Tok}(\mathrm{Chat}(p_i, x))]
 $$
 
 其中 $z_i$ 是上游 agent 聚合得到的 latent prefix。
 
+`build_input_ids()` 仍然存在，但当前主要服务于 `legacy_plain_with_prefix` 这类旧式生成路径，不再是非终端 latent reasoning 的默认构造方式。
+
 ### 5.3 终端 agent 的训练输入格式
 
-在训练阶段，终端 agent 使用 `forward_for_loss()`。当前默认训练配置 `configs/experiments/gsm8k_5agent.yaml` 使用的是 `training.input_mode = chat_with_prefix`，但底层实现同时支持 legacy 与 chat 两条路径。
+在训练阶段，终端 agent 使用 `forward_for_loss()`。当前默认训练路径使用的是 `training.input_mode = chat_with_prefix`，但底层实现同时支持 legacy 与 chat 两条路径。
 
 若使用 `legacy_plain_with_prefix`，输入形式为：
 
@@ -182,9 +187,11 @@ B. ...
 
 因此 ARC 的选项信息是在 tokenizer 之前就进入 prompt 的，不依赖额外的 runtime prompt 拼接分支。
 
+对 `gsm8k` 而言，这里的 `y` 当前也不是“只保留 `####` 之后的最终答案字符串”，而是去掉 `<<...>>` 标记后的完整解题文本；评测与 probe 再从生成文本和 gold 文本里抽取最终答案比较。
+
 ### 5.4 终端 agent 的评测输入格式
 
-在评测阶段，终端 agent 使用 `generate_answer()`，输入形式为：
+在评测阶段，终端 agent 使用 `generate_answer()`，默认仍走 `chat_with_prefix`。其输入形式可近似写为：
 
 $$
 [z_T ; p_T ; x]
@@ -193,6 +200,8 @@ $$
 此时不再拼接标准答案，而是让模型自回归生成输出文本。
 
 当前评测额外还支持一个 inference-only 消融模式 `chat_with_text`。在这个模式下，通信介质不再是 latent prefix，而是文本消息。非终端 agent 会先生成文本，下游 agent 再把这些上游文本和原问题一起组织成 chat prompt。
+
+对 `gsm8k` 这类答案抽取任务，当前评测默认 `max_new_tokens = 4096`，对应 CLI 默认值和 `configs/eval/gsm8k.yaml` 已同步。
 
 对 ARC，这里的“原问题”同样指格式化后的完整题面，也就是包含 `Choices:` 段落的文本。
 

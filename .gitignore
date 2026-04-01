@@ -26,6 +26,7 @@ ENV/
 *.swp
 *.swo
 *~
+.worktrees/
 
 # ── Jupyter ──
 .ipynb_checkpoints/
@@ -48,3 +49,5 @@ wandb/
 .env
 LatentMAS/
 data/
+trl/
+verl-agent/

@@ -1,6 +1,6 @@
 task: gsm8k
 split: test
-max_new_tokens: 1024
+max_new_tokens: 4096
 max_samples: -1
 inference_mode: chat_with_prefix
 use_terminal_prefix: true

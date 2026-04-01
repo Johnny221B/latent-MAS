@@ -16,7 +16,7 @@ training:
   task: "am_deepseek_r1_distilled"
   train_strategy: "communication_only"
   input_mode: "chat_with_prefix"
-  batch_size: 4
+  batch_size: 2
   lr: 0.00005
   weight_decay: 0.01
   epochs: 1
@@ -24,9 +24,10 @@ training:
   lambda_add: 0.1
   lambda_drop: 0.005
   lambda_sparse: 0.005
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   log_interval: 1
-  save_interval: 1000
+  save_interval: 5000
+  # resume_from_checkpoint: "outputs/am_deepseek_r1_distilled_qwen3-4b_20260326_130242/checkpoint_step3000.pt"
 
 training_probe:
   enabled: true

@@ -74,7 +74,7 @@ class LearnableAdjacency(nn.Module):
         self,
         prior: torch.Tensor,
         allowed_edges_mask: torch.Tensor | None = None,
-        init_scale: float = 2.0,
+        init_scale: float = 6.0,
     ):
         """
         Args:

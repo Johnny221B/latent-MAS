@@ -64,6 +64,10 @@ def _normalize_config(config: dict) -> None:
     training_cfg.setdefault("save_final_checkpoint", True)
     training_cfg.setdefault("shuffle", True)
     training_cfg.setdefault("seed", 42)
+    training_cfg.setdefault("resume_from_checkpoint", None)
+    if isinstance(training_cfg.get("resume_from_checkpoint"), str):
+        resume_path = training_cfg["resume_from_checkpoint"].strip()
+        training_cfg["resume_from_checkpoint"] = resume_path or None
 
     evaluation_cfg = config.setdefault("evaluation", {})
     evaluation_cfg.setdefault("run_after_train", False)

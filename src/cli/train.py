@@ -375,6 +375,116 @@ def write_probe_history_json(path: Path, history: list[dict]) -> None:
         json.dump(history, f, indent=2, ensure_ascii=False)
 
 
+def resolve_resume_checkpoint(training_cfg: dict) -> Path | None:
+    raw_path = training_cfg.get("resume_from_checkpoint")
+    if raw_path is None:
+        return None
+
+    checkpoint_path = Path(raw_path).expanduser().resolve()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+    return checkpoint_path
+
+
+def resolve_training_output_dir(config: dict) -> Path:
+    resume_checkpoint = resolve_resume_checkpoint(config.get("training", {}))
+    if resume_checkpoint is not None:
+        return resume_checkpoint.parent
+
+    base_output_dir = config.get("output", {}).get("dir", "outputs/run")
+    return build_timestamped_output_dir(base_output_dir)
+
+
+def compute_resume_schedule(
+    *,
+    checkpoint: dict,
+    batches_per_epoch: int,
+    grad_accum_steps: int,
+) -> dict:
+    if batches_per_epoch <= 0:
+        raise ValueError("batches_per_epoch must be positive when computing a resume schedule")
+
+    global_step = int(checkpoint.get("step", 0))
+    if "epoch" in checkpoint and "next_batch_idx" in checkpoint:
+        start_epoch = max(int(checkpoint["epoch"]), 0)
+        skip_batches_in_epoch = max(int(checkpoint["next_batch_idx"]), 0)
+    else:
+        completed_batches = global_step * max(int(grad_accum_steps), 1)
+        start_epoch = completed_batches // batches_per_epoch
+        skip_batches_in_epoch = completed_batches % batches_per_epoch
+
+    start_epoch += skip_batches_in_epoch // batches_per_epoch
+    skip_batches_in_epoch = skip_batches_in_epoch % batches_per_epoch
+    return {
+        "global_step": global_step,
+        "start_epoch": start_epoch,
+        "skip_batches_in_epoch": skip_batches_in_epoch,
+    }
+
+
+def load_training_checkpoint(
+    *,
+    checkpoint_path: str | Path,
+    compressor,
+    adjacency,
+    optimizer,
+    batches_per_epoch: int | None = None,
+    grad_accum_steps: int = 1,
+    base_model_module=None,
+    trainable_base_model: bool = False,
+) -> dict:
+    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    checkpoint_step = int(checkpoint.get("step", 0))
+    if checkpoint_step < 0:
+        raise ValueError(f"Checkpoint step must be non-negative: {checkpoint_step}")
+
+    compressor_state = checkpoint.get("compressor_state")
+    adjacency_state = checkpoint.get("adjacency_state")
+    optimizer_state = checkpoint.get("optimizer_state")
+    if compressor_state is None or adjacency_state is None or optimizer_state is None:
+        raise ValueError(
+            "Resume checkpoint is missing one of the required training states: "
+            "compressor_state, adjacency_state, optimizer_state"
+        )
+
+    compressor.load_state_dict(compressor_state)
+    adjacency.load_state_dict(adjacency_state)
+    optimizer.load_state_dict(optimizer_state)
+
+    if trainable_base_model:
+        base_model_state = checkpoint.get("base_model_state")
+        if base_model_module is None or base_model_state is None:
+            raise ValueError(
+                "Full-finetune resume requires both base_model_module and base_model_state"
+            )
+        base_model_module.load_state_dict(base_model_state)
+
+    if batches_per_epoch is None:
+        if "epoch" not in checkpoint or "next_batch_idx" not in checkpoint:
+            raise ValueError(
+                "batches_per_epoch is required when checkpoint metadata does not "
+                "contain epoch and next_batch_idx"
+            )
+        schedule = {
+            "global_step": checkpoint_step,
+            "start_epoch": max(int(checkpoint["epoch"]), 0),
+            "skip_batches_in_epoch": max(int(checkpoint["next_batch_idx"]), 0),
+        }
+    else:
+        schedule = compute_resume_schedule(
+            checkpoint=checkpoint,
+            batches_per_epoch=batches_per_epoch,
+            grad_accum_steps=grad_accum_steps,
+        )
+
+    return {
+        "checkpoint_path": str(checkpoint_path),
+        **schedule,
+    }
+
+
 def maybe_build_probe_wandb_table(run, samples: list[dict]):
     if run is None:
         return None
@@ -401,6 +511,7 @@ def train(config_path: str, max_samples: int | None = None):
     probe_cfg = config.get("training_probe", {})
     training_input_mode = training_cfg.get("input_mode", "legacy_plain_with_prefix")
     training_seed = int(training_cfg.get("seed", 42))
+    resume_checkpoint = resolve_resume_checkpoint(training_cfg)
 
     # ── Setup device ──
     device, is_ddp = setup_distributed()
@@ -518,10 +629,22 @@ def train(config_path: str, max_samples: int | None = None):
         else system.base_model.model
     )
     adjacency = system.adjacency
-    
-    # ── Output directory with timestamp ──
-    base_output_dir = config.get("output", {}).get("dir", "outputs/run")
-    output_dir = build_timestamped_output_dir(base_output_dir)
+
+    resume_state = None
+    if resume_checkpoint is not None:
+        resume_state = load_training_checkpoint(
+            checkpoint_path=resume_checkpoint,
+            compressor=compressor,
+            adjacency=adjacency,
+            optimizer=optimizer,
+            batches_per_epoch=len(dataloader),
+            grad_accum_steps=grad_accum_steps,
+            base_model_module=base_model_module if trainable_base_model else None,
+            trainable_base_model=trainable_base_model,
+        )
+
+    # ── Output directory with timestamp or resume target ──
+    output_dir = resolve_training_output_dir(config)
     if is_main_process():
         output_dir.mkdir(parents=True, exist_ok=True)
         # Save config for reproducibility
@@ -538,6 +661,14 @@ def train(config_path: str, max_samples: int | None = None):
         )
         write_probe_history_json(output_dir / "run_provenance.json", run_provenance)
         print(f"  Output dir: {output_dir}")
+        if resume_state is not None:
+            print(
+                "  Resume checkpoint: "
+                f"{resume_state['checkpoint_path']} "
+                f"(step={resume_state['global_step']}, "
+                f"epoch={resume_state['start_epoch']}, "
+                f"skip_batches={resume_state['skip_batches_in_epoch']})"
+            )
 
     wandb_run = init_wandb_run(config=config, output_dir=output_dir, rank=rank)
 
@@ -558,10 +689,14 @@ def train(config_path: str, max_samples: int | None = None):
             ],
         )
 
-    global_step = 0
+    global_step = resume_state["global_step"] if resume_state is not None else 0
+    start_epoch = resume_state["start_epoch"] if resume_state is not None else 0
+    skip_batches_in_start_epoch = (
+        resume_state["skip_batches_in_epoch"] if resume_state is not None else 0
+    )
     train_start = time.time()
     total_batches = training_cfg["epochs"] * len(dataloader)
-    for epoch in range(training_cfg["epochs"]):
+    for epoch in range(start_epoch, training_cfg["epochs"]):
         if sampler is not None:
             sampler.set_epoch(epoch)  # ensure different shuffling each epoch
 
@@ -570,6 +705,9 @@ def train(config_path: str, max_samples: int | None = None):
         epoch_batches = 0
 
         for batch_idx, batch in enumerate(dataloader):
+            if epoch == start_epoch and batch_idx < skip_batches_in_start_epoch:
+                continue
+
             t0 = time.time()
             comp_grad = None
             adj_grad = None
@@ -748,6 +886,8 @@ def train(config_path: str, max_samples: int | None = None):
                 ckpt_path = output_dir / f"checkpoint_step{global_step}.pt"
                 torch.save({
                     "step": global_step,
+                    "epoch": epoch,
+                    "next_batch_idx": batch_idx + 1,
                     "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
                     "compressor_state": compressor.state_dict(),
                     "adjacency_state": adjacency.state_dict(),
@@ -828,6 +968,8 @@ def train(config_path: str, max_samples: int | None = None):
             final_path = output_dir / "final_model.pt"
             torch.save({
                 "step": global_step,
+                "epoch": training_cfg["epochs"],
+                "next_batch_idx": 0,
                 "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
                 "compressor_state": compressor.state_dict(),
                 "adjacency_state": adjacency.state_dict(),

@@ -1,6 +1,6 @@
 {
     "role_name": "solver",
-    "system_prompt": "You are a solver agent. Based on the analysis provided, execute the solution step by step. Show your work and arrive at a concrete answer.",
-    "reasoning_steps": 25,
-    "compress_last_k": 25
+    "system_prompt": "You are provided with latent information for reference and a target question to solve. The latent information might contain irrelevant contents. Ignore it if it is not helpful. You must reason step-by-step to solve the provided question.",
+    "reasoning_steps": 40,
+    "compress_last_k": 40
 }

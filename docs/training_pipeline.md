@@ -56,7 +56,7 @@ $$
 }
 ```
 
-其中，GSM8K 的答案字段会经过额外抽取，只保留 `####` 之后的最终数值答案。这意味着当前训练不是在拟合完整解题过程，而是在拟合最终答案字符串。
+其中，GSM8K 的答案字段当前不会裁成单独的最终答案。dataset 层只会去掉原始标注里的 `<<...>>` 内联计算标记，并保留清洗后的完整解题文本，通常仍包含末尾的 `####` 答案行。这意味着当前训练拟合的是“清洗后的完整解题过程 + 最终答案”，而不是单独的最终数值字符串。评测与训练期 probe 则会再从生成文本和 gold 文本中抽取最终答案做 exact-match。
 
 `ARC-Easy` 与 `ARC-Challenge` 虽然在统一接口里仍然表现为 `question -> answerKey`，但这里的 `question` 不是原始裸字段。dataset 层会先把原题和候选项渲染成：
 
@@ -157,9 +157,11 @@ B. ...
 
 因此，从训练代码角度，一个 batch 的监督信号并不是“整段提示词 + 答案”的统一序列，而是问题和答案被分开编码，之后在终端 agent 中再拼接。
 
-当前默认实验配置 [gsm8k_5agent.yaml](../configs/experiments/gsm8k_5agent.yaml) 显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
+当前 GSM8K 相关实验配置显式设置了 `training.input_mode = chat_with_prefix`，因此终端 agent 在训练时默认会先按 chat template 组织 `system_prompt + question`，再拼接标准答案做 teacher forcing。
 
-`competition_math` 也沿用这一路径；不同之处只在于监督答案是完整 `solution` 文本，而不是 GSM8K 的 `####` 段落或抽取后的单个最终答案字符串。
+`gsm8k` 也沿用这一路径；不同之处在于监督答案是“去掉 `<<...>>` 标记后的完整解题文本”，而不是单独的最终答案字符串。对应地，评测时会对生成结果和 gold 文本统一执行最终答案抽取。
+
+`competition_math` 也沿用这一路径；不同之处只在于监督答案是完整 `solution` 文本。
 
 `am_deepseek_r1_distilled` 同样沿用这一路径；不同之处在于监督答案不是“最终答案字符串”，而是 assistant 的整段输出，也就是带 `<think>` 与 `<answer>` 标签的完整响应文本。
 
@@ -168,6 +170,8 @@ B. ...
 另外，当前评测路径额外支持 `evaluation.inference_mode = chat_with_text`。这个模式只用于推理期消融，不会改变训练；它的作用是把 agent 间通信从 latent prefix 改成文本消息，以便和原始 latent communication 做对照。
 
 当前 `evaluate.py` 还支持单题手工推理：可直接传入 `--question "..."` 和可选 `--output-dir`。这条路径不会读取评测数据集，而是构造一条临时样本，并复用与批量评测相同的 `eval_results.json`、`agent_logs.json`、`agent_log/<role>.json` 输出文件组织。当前 `eval_results.json` 只保存逐样本预测结果，不再内嵌 agent 级日志；agent 细节单独落到 `agent_logs.json` 与 `agent_log/<role>.json`。
+
+对于 `gsm8k` 这类答案抽取任务，当前评测默认的 `generation_max_new_tokens` 已提升到 `4096`，命令行 `--max-new-tokens` 默认值和 `configs/eval/gsm8k.yaml` 也与此保持一致，以降低长推理答案被过早截断的概率。
 
 对 `humaneval` 而言，`evaluate.py` 的主路径与上述 answer-matching 任务不同：
 
@@ -228,7 +232,12 @@ agent 逻辑定义在 [agent.py](../src/models/agent.py)。
 - 一个 latent reasoning 步数
 - 一个压缩窗口长度
 
-在默认 5-agent 图中，agent 顺序为：
+实际 agent 顺序由 graph config 决定。当前仓库内至少包含两种常用拓扑：
+
+1. `default_5agent.json`：`reader -> planner -> analyst -> solver -> summarizer`
+2. `chain_4agent.json`：`planner -> critic -> refiner -> solver`
+
+其中，5-agent 图的顺序为：
 
 1. `reader`
 2. `planner`
@@ -262,6 +271,8 @@ $$
 
 其中 $L_p$ 是固定的 prefix 长度，也就是配置中的 `num_queries`。
 
+当前实现里的 `LatentCompressor` 已不再固定为单层 cross-attention。配置中的 `num_layers` 决定重复堆叠多少个“cross-attention + residual + FFN + LayerNorm”块；所有 agent 共享同一个 compressor 实例。
+
 这个模块是当前仓库中第一个真正参与训练的核心组件。
 
 ### 3.4 LearnableAdjacency
@@ -288,7 +299,7 @@ $$
 
 表示从 agent $i$ 到 agent $j$ 的通信强度。
 
-为了保证图是 DAG，当前实现只允许上三角位置存在有效边。对角线和下三角位置会被强制屏蔽。
+为了保证图是 DAG，当前实现会根据 graph config 中的 `execution_order` 构造 allowed-edge mask，只允许拓扑顺序里更早的节点指向更晚的节点。初始化时，prior 中存在的边默认会被赋予较大的正 logits，不存在的边赋予较大的负 logits；当前 `init_scale` 默认值为 `6.0`，因此初始 soft adjacency 会更接近一个高置信度的先验图。
 
 这个模块是当前仓库中第二个参与训练的核心组件。
 
@@ -342,21 +353,21 @@ $$
 
 ## 4.2 阶段二：非终端 agent 的 latent reasoning
 
-对于每个非终端 agent $a_j$，它的文本输入首先构造为：
+对于每个非终端 agent $a_j$，当前代码不会再直接把 role prompt token 与问题 token 裸拼接。相反，它会先把问题 token 解码回文本，再构造 chat-format prompt：
 
 $$
-I_j = [r_j ; X]
+C_j = \mathrm{Chat}(r_j, x)
 $$
 
-其中 $r_j$ 表示第 $j$ 个 agent 的 role prompt token 序列。
+其中 $r_j$ 表示第 $j$ 个 agent 的 system prompt，$x$ 表示问题文本。
 
 如果该 agent 有上游消息，那么其真正送入基础模型的是：
 
 $$
-[\; z_j \; ; \; r_j \; ; \; X \;]
+[\; z_j \; ; \; \mathrm{Tok}(C_j) \;]
 $$
 
-其中 $z_j$ 以 embedding prefix 的形式拼接在最前面。
+其中 $z_j$ 以 embedding prefix 的形式拼接在最前面。当前 latent reasoning 路径还会在 chat prompt tokenization 时显式关闭 `enable_thinking`，并把文本侧输入截断到 `2048` tokens。
 
 然后 agent 调用 `latent_reasoning()`，执行 $m$ 步潜空间推理。设第 $t$ 步末尾的隐藏状态为 $h_t$，则 latent reasoning 的核心递推思想是：
 
@@ -428,13 +439,19 @@ $$
 
 终端 agent 与非终端 agent 的行为不同。训练时，它不再继续 latent reasoning，而是直接执行一次 teacher-forced forward。
 
-它的输入可以写成：
+在当前默认的 `chat_with_prefix` 模式下，它的输入可以写成：
 
 $$
-I_{\text{term}} = [\; z_{\text{term}} \; ; \; r_{\text{term}} \; ; \; X \; ; \; Y \;]
+I_{\text{term}} = [\; z_{\text{term}} \; ; \; \mathrm{Chat}(r_{\text{term}}, x) \; ; \; Y \;]
 $$
 
-基础模型输出 logits 后，代码会把 role prompt 对应的位置切掉，只保留与问题和答案对齐的部分：
+如果显式切回 `legacy_plain_with_prefix`，才会退回旧式的：
+
+$$
+[\; z_{\text{term}} \; ; \; r_{\text{term}} \; ; \; X \; ; \; Y \;]
+$$
+
+基础模型输出 logits 后，代码会保留“prompt 侧 + answer 侧”对齐后的部分；在 legacy 模式下，这里的 prompt 侧等价于问题长度，在 chat 模式下则等价于整个 chat prompt 长度：
 
 $$
 \mathrm{logits} \in \mathbb{R}^{B \times (|X| + |Y|) \times V}
@@ -449,15 +466,15 @@ $$
 
 标签构造定义在 [base.py](../src/data/base.py) 中的 `build_labels()`。
 
-设问题长度为 $|X|$，答案长度为 $|Y|$。则监督标签定义为：
+设对齐后 prompt 长度为 $|Q|$，答案长度为 $|Y|$。则监督标签定义为：
 
 $$
-\ell = [\underbrace{-100, -100, \dots, -100}_{|X|}, y_1, y_2, \dots, y_{|Y|}]
+\ell = [\underbrace{-100, -100, \dots, -100}_{|Q|}, y_1, y_2, \dots, y_{|Y|}]
 $$
 
 这里 `-100` 是 PyTorch 交叉熵中的忽略标记。因此：
 
-- question 位置不参与监督
+- prompt 侧位置不参与监督
 - 只有 answer 位置参与监督
 
 这意味着当前系统的训练目标不是“重建整段输入”，而是“在给定问题和 latent communication 的条件下，预测正确答案”。
@@ -641,6 +658,32 @@ $$
 - `config`
 
 不会重新保存基础模型权重，因为基础模型来自 Hugging Face 且始终冻结。
+
+中间检查点 `checkpoint_step*.pt` 则额外保存继续训练所需的状态，包括：
+
+- `step`
+- `epoch`
+- `next_batch_idx`
+- `compressor_state`
+- `adjacency_state`
+- `optimizer_state`
+- 可选的 `base_model_state`（仅在 `full_finetune` 时）
+
+当前训练配置还支持 `training.resume_from_checkpoint`。当该字段被设为某个中间检查点路径，例如：
+
+```yaml
+training:
+  resume_from_checkpoint: outputs/am_deepseek_r1_distilled_qwen3-4b_20260326_130242/checkpoint_step3000.pt
+```
+
+训练入口会在启动时：
+
+- 从该 checkpoint 恢复训练态参数与 optimizer
+- 恢复 `global_step`
+- 按 checkpoint 记录的进度继续当前 epoch 中尚未完成的 batch
+- 强制把后续 `config.yaml`、新 checkpoint 与 `final_model.pt` 继续写回同一个 run 目录，也就是 checkpoint 所在目录
+
+若 `resume_from_checkpoint` 为空，则仍保持原来的默认行为：创建新的带时间戳输出目录并从头开始训练。
 
 `run_provenance.json` 用于记录本次训练的最小可追溯信息，包括：
 

@@ -1,6 +1,6 @@
 {
     "role_name": "critic",
-    "system_prompt": "You are a critic agent. Review the proposed solution, verify its correctness, and produce the final answer. If there are errors, correct them.",
-    "reasoning_steps": 25,
-    "compress_last_k": 25
+    "system_prompt": "You are a Critic Agent. You receive a plan in latent representation format. Evaluate the correctness of the plan for the given question and provide constructive feedback for improving it.",
+    "reasoning_steps": 40,
+    "compress_last_k": 40
 }

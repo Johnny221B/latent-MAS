@@ -259,30 +259,31 @@ class Agent:
             task_attention_mask: torch.Tensor | None = None,
             upstream_prefix: torch.Tensor | None = None,
         ) -> dict:
-            """Perform latent reasoning and return hidden trajectory.
-
-            Each agent reasons in continuous latent space for m steps,
-            then returns the last k hidden states for compression.
-
-            Returns:
-                dict with:
-                    - hidden_trajectory: [B, k, D] last k latent thoughts for compressor
-                    - compressor_mask: [B, k] all ones (no padding in latent thoughts)
-                    - full_trajectory: [B, m, D] complete latent thoughts (for logging)
-                    - prefix_len: int
-            """
-            input_ids = self.build_input_ids(task_token_ids)
-
-            if task_attention_mask is not None:
-                role_mask = torch.ones(
-                    task_attention_mask.shape[0],
-                    self._get_role_token_ids().shape[1],
-                    device=task_attention_mask.device,
-                    dtype=task_attention_mask.dtype,
+            """Perform latent reasoning and return hidden trajectory."""
+            # Build chat-formatted input instead of raw concatenation
+            question_texts = self.base_model.tokenizer.batch_decode(
+                task_token_ids.detach().cpu(),
+                skip_special_tokens=True,
+            )
+            prompts = [
+                self.build_chat_prompt_text(
+                    tokenizer=self.base_model.tokenizer,
+                    question_text=q,
+                    system_prompt=self.system_prompt,
+                    enable_thinking=False,
                 )
-                attention_mask = torch.cat([role_mask, task_attention_mask], dim=1)
-            else:
-                attention_mask = None
+                for q in question_texts
+            ]
+            tokenized = self.base_model.tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=2048,
+                add_special_tokens=False,
+            )
+            input_ids = tokenized["input_ids"].to(task_token_ids.device)
+            attention_mask = tokenized["attention_mask"].to(task_token_ids.device)
 
             # Latent reasoning in continuous space (no grad needed — frozen model)
             with torch.no_grad():
@@ -294,7 +295,6 @@ class Agent:
                 )
 
             # Detach trajectory but keep it as a regular tensor for compressor
-            # Compressor will create its own computation graph from here
             output["hidden_trajectory"] = output["hidden_trajectory"].detach()
 
             trajectory = output["hidden_trajectory"]  # [B, m, D]
@@ -311,6 +311,7 @@ class Agent:
                 "full_trajectory": trajectory,
                 "prefix_len": output["prefix_len"],
             }
+
         
     def forward_for_loss(
         self,
@@ -398,7 +399,7 @@ class Agent:
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
         upstream_texts: list[list[str]] | None = None,
-        max_new_tokens: int = 2048,
+        max_new_tokens: int = 4096,
         temperature: float = 0.6,
         top_p: float = 0.95,
         do_sample: bool = True,

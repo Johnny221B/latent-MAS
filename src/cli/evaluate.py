@@ -793,7 +793,7 @@ def evaluate_loaded_system(
                         for key, value in generation.items()
                     }
                     pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
-                    gold = batch_answers[sample_idx].strip()
+                    gold = extract_answer(batch_answers[sample_idx], task_type=task)
                     is_correct = pred.strip() == gold.strip()
                     local_update.append(
                         {
@@ -992,7 +992,7 @@ def evaluate_loaded_system(
                     max_new_tokens=generation_max_new_tokens,
                 )
                 pred = extract_answer(baseline_text, task_type=task)
-                gold = batch["answers"][sample_idx].strip()
+                gold = extract_answer(batch["answers"][sample_idx], task_type=task)
                 baseline_update.append(
                     {
                         "question_id": batch["question_ids"][sample_idx],
@@ -1153,7 +1153,7 @@ def evaluate(
     config = merge_eval_config(config_path, eval_config_path)
     evaluation_cfg = config.get("evaluation", {})
     split = split or evaluation_cfg.get("split", "test")
-    generation_max_new_tokens = max_new_tokens or evaluation_cfg.get("max_new_tokens", 2048)
+    generation_max_new_tokens = max_new_tokens or evaluation_cfg.get("max_new_tokens", 4096)
     inference_mode = inference_mode or evaluation_cfg.get("inference_mode", "chat_with_prefix")
     if use_terminal_prefix is None:
         use_terminal_prefix = bool(evaluation_cfg.get("use_terminal_prefix", True))
@@ -1336,7 +1336,7 @@ def evaluate(
                         for key, value in generation.items()
                     }
                     pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
-                    gold = batch_answers[sample_idx].strip()
+                    gold = extract_answer(batch_answers[sample_idx], task_type=task)
                     is_correct = pred.strip() == gold.strip()
                     local_update.append(
                         {
@@ -1553,7 +1553,7 @@ def evaluate(
             batch = next(dataloader_iter)
             tokenized = system.base_model.tokenize(
                 batch["questions"],
-                max_length=config["training"].get("max_seq_len", 2048),
+                max_length=config["training"].get("max_seq_len", 4096),
             )
             task_ids = tokenized["input_ids"].to(device)
             task_mask = tokenized["attention_mask"].to(device)
@@ -1582,7 +1582,7 @@ def evaluate(
                 )
 
                 pred = extract_answer(baseline_text, task_type=task)
-                gold = batch["answers"][sample_idx].strip()
+                gold = extract_answer(batch["answers"][sample_idx], task_type=task)
                 baseline_update.append(
                     {
                         "question_id": batch["question_ids"][sample_idx],
@@ -1741,7 +1741,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval-config", type=str, default=None)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--split", type=str, default=None, choices=["train", "test"])
-    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=4096)
     parser.add_argument("--question", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument(

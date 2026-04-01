@@ -489,6 +489,7 @@ class BaseModelWrapper(nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones(B, inputs_embeds.shape[1], device=device, dtype=torch.long)
 
+
         # Initial forward: encode the full input, get KV cache
         outputs = self.model(
             inputs_embeds=inputs_embeds,
@@ -562,3 +563,19 @@ class BaseModelWrapper(nn.Module):
             max_length=max_length,
             add_special_tokens=add_special_tokens,
         )
+        
+    def _find_user_start(self, input_ids, pattern_ids):
+        pattern = torch.tensor(pattern_ids, device=input_ids.device)
+        pattern_len = len(pattern_ids)
+        positions = []
+        for i in range(input_ids.shape[0]):
+            found = False
+            for j in range(input_ids.shape[1] - pattern_len + 1):
+                if torch.equal(input_ids[i, j:j+pattern_len], pattern):
+                    positions.append(j + pattern_len)
+                    found = True
+                    break
+            if not found:
+                positions.append(0)  # fallback: prepend
+        return positions
+

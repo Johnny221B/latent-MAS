@@ -71,17 +71,17 @@ $$
 P_i = C(S_i),
 $$
 
-其中当前实现使用的是一个共享 compressor $C$。更一般的 $C_{i \to j}$ 或 role-pair-specific compressor 仍然可以作为后续扩展方向，但不是当前版本默认能力。
+其中当前实现使用的是一个共享 compressor $C$。它的内部结构当前是可配置层数的 cross-attention 堆叠，而不是固定单层。更一般的 $C_{i \to j}$ 或 role-pair-specific compressor 仍然可以作为后续扩展方向，但不是当前版本默认能力。
 
 对于下游 agent $j$，它会把所有来自上游节点的消息聚合成一个统一的 latent prefix：
 
 $$
-z_j = \sum_{i \in \mathcal{N}(j)} A_{ij} P_i,
+z_j = \frac{\sum_{i \in \mathcal{N}(j)} A_{ij} P_i}{\sum_{i \in \mathcal{N}(j)} A_{ij} + \epsilon},
 $$
 
-其中 $\mathcal{N}(j)$ 表示节点 $j$ 的所有上游邻居集合。
+其中 $\mathcal{N}(j)$ 表示节点 $j$ 的所有上游邻居集合，$\epsilon$ 是数值稳定项。
 
-随后，这个聚合后的消息 $z_j$ 会作为 latent prefix 注入到 agent $j$ 的输入前部，并与任务输入和角色相关提示一起送入模型。agent $j$ 再基于这个增强后的输入继续执行自己的 latent reasoning。
+随后，这个聚合后的消息 $z_j$ 会作为 latent prefix 注入到 agent $j$ 的输入前部，并与任务输入和角色相关提示一起送入模型。当前默认实现里，这部分“任务输入 + 角色提示”通常会先整理成 chat-format 的 `system/user` 结构，再进入模型。agent $j$ 再基于这个增强后的输入继续执行自己的 latent reasoning。
 
 这个形式化描述表达的核心思想是：agent 之间并不是通过自然语言显式交流，而是通过对内部推理过程进行压缩之后得到的连续潜空间表示来通信。
 
@@ -126,7 +126,7 @@ $$
 
 二者在训练阶段都可以写成监督学习的 `(x, y)` 形式，但 `y` 的语义不同：
 
-- 对 `gsm8k` 一类任务，`y` 是最终答案字符串
+- 对 `gsm8k` 一类任务，`y` 是去掉 `<<...>>` 标记后的完整解题文本；评测时再抽取最终答案
 - 对 `competition_math`，`y` 是完整题解 `solution` 文本
 - 对 `humaneval`，`y` 是代码补全 `canonical_solution`
 

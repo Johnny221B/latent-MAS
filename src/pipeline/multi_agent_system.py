@@ -109,6 +109,7 @@ class MultiAgentSystem(nn.Module):
             num_queries=compressor_cfg.get("num_queries", 16),
             num_heads=compressor_cfg.get("num_heads", 8),
             dropout=compressor_cfg.get("dropout", 0.1),
+            num_layers=compressor_cfg.get("num_layers", 1),
             target_norm=target_norm,
         )
 
@@ -116,6 +117,7 @@ class MultiAgentSystem(nn.Module):
         self.adjacency = LearnableAdjacency(
             prior=prior,
             allowed_edges_mask=allowed_edges_mask,
+            init_scale=6.0,
         )
 
         # ── Executor (stateless) ──
