@@ -14,6 +14,7 @@ Extensibility:
 """
 
 import torch
+from transformers.cache_utils import DynamicCache
 from .base_model import BaseModelWrapper
 
 
@@ -207,6 +208,14 @@ class Agent:
         return "stopped_early"
 
     @staticmethod
+    def _past_length(past_key_values) -> int:
+        if past_key_values is None:
+            return 0
+        if hasattr(past_key_values, "get_seq_length"):
+            return int(past_key_values.get_seq_length())
+        return int(past_key_values[0][0].shape[-2])
+
+    @staticmethod
     def _finalize_generation_outputs(
         tokenizer,
         generated_token_ids: list[list[int]],
@@ -254,87 +263,88 @@ class Agent:
         return generated_text
 
     def reason(
-            self,
-            task_token_ids: torch.LongTensor,
-            task_attention_mask: torch.Tensor | None = None,
-            upstream_prefix: torch.Tensor | None = None,
-        ) -> dict:
-            """Perform latent reasoning and return hidden trajectory."""
-            # Build chat-formatted input instead of raw concatenation
-            question_texts = self.base_model.tokenizer.batch_decode(
-                task_token_ids.detach().cpu(),
-                skip_special_tokens=True,
+        self,
+        task_token_ids: torch.LongTensor,
+        task_attention_mask: torch.Tensor | None = None,
+        upstream_prefix: torch.Tensor | None = None,
+        upstream_prefix_kv: DynamicCache | tuple | None = None,
+        prefix_len: int = 0,
+    ) -> dict:
+        """Perform latent reasoning and return hidden trajectory."""
+        # Build chat-formatted input instead of raw concatenation
+        question_texts = self.base_model.tokenizer.batch_decode(
+            task_token_ids.detach().cpu(),
+            skip_special_tokens=True,
+        )
+        prompts = [
+            self.build_chat_prompt_text(
+                tokenizer=self.base_model.tokenizer,
+                question_text=q,
+                system_prompt=self.system_prompt,
+                enable_thinking=False,
             )
-            prompts = [
-                self.build_chat_prompt_text(
-                    tokenizer=self.base_model.tokenizer,
-                    question_text=q,
-                    system_prompt=self.system_prompt,
-                    enable_thinking=False,
-                )
-                for q in question_texts
-            ]
-            tokenized = self.base_model.tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=2048,
-                add_special_tokens=False,
+            for q in question_texts
+        ]
+        tokenized = self.base_model.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=2048,
+            add_special_tokens=False,
+        )
+        input_ids = tokenized["input_ids"].to(task_token_ids.device)
+        attention_mask = tokenized["attention_mask"].to(task_token_ids.device)
+
+        # Latent reasoning in continuous space (no grad needed — frozen model)
+        with torch.no_grad():
+            output = self.base_model.latent_reasoning(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                prefix_embeds=upstream_prefix if upstream_prefix_kv is None else None,
+                past_key_values=upstream_prefix_kv,
+                num_latent_steps=self.reasoning_steps,
             )
-            input_ids = tokenized["input_ids"].to(task_token_ids.device)
-            attention_mask = tokenized["attention_mask"].to(task_token_ids.device)
 
-            # Latent reasoning in continuous space (no grad needed — frozen model)
-            with torch.no_grad():
-                output = self.base_model.latent_reasoning(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    prefix_embeds=upstream_prefix,
-                    num_latent_steps=self.reasoning_steps,
-                )
+        # Detach trajectory but keep it as a regular tensor for compressor
+        output["hidden_trajectory"] = output["hidden_trajectory"].detach()
 
-            # Detach trajectory but keep it as a regular tensor for compressor
-            output["hidden_trajectory"] = output["hidden_trajectory"].detach()
+        trajectory = output["hidden_trajectory"]  # [B, m, D]
+        B, m, D = trajectory.shape
 
-            trajectory = output["hidden_trajectory"]  # [B, m, D]
-            B, m, D = trajectory.shape
+        # Only compress the last k hidden states
+        k = min(self.compress_last_k, m)
+        trajectory_to_compress = trajectory[:, -k:, :]
+        compressor_mask = torch.ones(B, k, device=trajectory.device)
 
-            # Only compress the last k hidden states
-            k = min(self.compress_last_k, m)
-            trajectory_to_compress = trajectory[:, -k:, :]
-            compressor_mask = torch.ones(B, k, device=trajectory.device)
-
-            return {
-                "hidden_trajectory": trajectory_to_compress,
-                "compressor_mask": compressor_mask,
-                "full_trajectory": trajectory,
-                "prefix_len": output["prefix_len"],
-            }
+        return {
+            "hidden_trajectory": trajectory_to_compress,
+            "compressor_mask": compressor_mask,
+            "full_trajectory": trajectory,
+            "prefix_len": output["prefix_len"],
+        }
 
         
+    # def forward_for_loss(
+    #     self,
+    #     task_token_ids: torch.LongTensor,
+    #     task_attention_mask: torch.Tensor | None = None,
+    #     upstream_prefix: torch.Tensor | None = None,
+    #     answer_ids: torch.LongTensor | None = None,
+    #     answer_mask: torch.Tensor | None = None,
+    #     input_mode: str = "legacy_plain_with_prefix",
+    # ) -> dict:
     def forward_for_loss(
         self,
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
+        upstream_prefix_kv: DynamicCache | tuple | None = None,  # 注意这里接收转换好的 KV Cache
+        prefix_len: int = 0,  # 需要知道 prefix_len 以便扩展 mask
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
         input_mode: str = "legacy_plain_with_prefix",
     ) -> dict:
-        """Forward pass for terminal agent with teacher forcing.
-
-        Input to model: [prefix ; role_prompt ; question ; answer]
-        Logits returned: aligned with [question ; answer] (role sliced off)
-        Labels should mask question positions with -100, keep answer positions.
-
-        Args:
-            task_token_ids: [B, question_len]
-            task_attention_mask: [B, question_len]
-            upstream_prefix: [B, Lp, D] or None
-            answer_ids: [B, answer_len] ground truth answer tokens
-            answer_mask: [B, answer_len] attention mask for answer
-        """
         if input_mode == "legacy_plain_with_prefix":
             role_ids = self._get_role_token_ids().expand(task_token_ids.shape[0], -1)
             if answer_ids is not None:
@@ -374,11 +384,29 @@ class Agent:
             prompt_len = prompt_ids.shape[1]
             logits_start = 0
 
+        effective_prefix_len = prefix_len
+        if upstream_prefix_kv is not None:
+            effective_prefix_len = self._past_length(upstream_prefix_kv)
+
+        if upstream_prefix_kv is not None and effective_prefix_len > 0:
+            B = input_ids.shape[0]
+            if attention_mask is None:
+                attention_mask = torch.ones(
+                    B,
+                    effective_prefix_len + input_ids.shape[1],
+                    device=input_ids.device,
+                    dtype=torch.long,
+                )
+            else:
+                prefix_mask = torch.ones(B, effective_prefix_len, device=attention_mask.device, dtype=attention_mask.dtype)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+
         # Forward through frozen model
         outputs = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            prefix_embeds=upstream_prefix,
+            prefix_embeds=upstream_prefix if upstream_prefix_kv is None else None,
+            past_key_values=upstream_prefix_kv,
             output_hidden_states=True,
         )
 
@@ -398,6 +426,8 @@ class Agent:
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
         upstream_prefix: torch.Tensor | None = None,
+        upstream_prefix_kv: DynamicCache | tuple | None = None,
+        prefix_len: int = 0,
         upstream_texts: list[list[str]] | None = None,
         max_new_tokens: int = 4096,
         temperature: float = 0.6,
@@ -413,16 +443,21 @@ class Agent:
             inference_mode=inference_mode,
             upstream_texts=upstream_texts,
         )
+        
         pad_token_id = self.base_model.tokenizer.pad_token_id
         if pad_token_id is None:
             pad_token_id = self.base_model.tokenizer.eos_token_id or 0
+            
         input_ids, attention_mask = self._left_pad_for_generation(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pad_token_id=pad_token_id,
         )
+        
         if not use_upstream_prefix:
             upstream_prefix = None
+            upstream_prefix_kv = None
+            
         eos_token_id = self.base_model.tokenizer.eos_token_id
         generation_model = (
             self.base_model._helper_model()
@@ -430,11 +465,66 @@ class Agent:
             else self.base_model.model
         )
 
-        # If we have upstream prefix, we need to:
-        # 1. Convert input_ids to embeddings
-        # 2. Prepend the prefix
-        # 3. Delegate generation to HF so cache/position handling stays model-correct
-        if upstream_prefix is not None:
+        if upstream_prefix_kv is not None:
+            effective_prefix_len = self._past_length(upstream_prefix_kv)
+            if attention_mask is not None:
+                prefix_mask = torch.ones(
+                    attention_mask.shape[0],
+                    effective_prefix_len,
+                    device=attention_mask.device,
+                    dtype=attention_mask.dtype,
+                )
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = torch.ones(
+                    input_ids.shape[0],
+                    effective_prefix_len + input_ids.shape[1],
+                    device=input_ids.device,
+                    dtype=torch.long,
+                )
+
+            generate_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "past_key_values": upstream_prefix_kv,
+                "cache_position": torch.arange(
+                    effective_prefix_len,
+                    effective_prefix_len + input_ids.shape[1],
+                    device=input_ids.device,
+                    dtype=torch.long,
+                ),
+                "max_new_tokens": max_new_tokens,
+                "do_sample": do_sample,
+                "pad_token_id": pad_token_id,
+                "return_dict_in_generate": True,
+            }
+            
+            if eos_token_id is not None:
+                generate_kwargs["eos_token_id"] = eos_token_id
+            if do_sample:
+                generate_kwargs["temperature"] = temperature
+                generate_kwargs["top_p"] = top_p
+                
+            gen_out = generation_model.generate(**generate_kwargs)
+            sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
+            
+            prompt_len = input_ids.shape[1]
+            generated_ids = [
+                sequences[row_idx][prompt_len:].tolist() 
+                for row_idx in range(sequences.shape[0])
+            ]
+
+            return self._finalize_generation_outputs(
+                tokenizer=self.base_model.tokenizer,
+                generated_token_ids=generated_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=max_new_tokens,
+                inference_mode=inference_mode,
+                use_upstream_prefix=use_upstream_prefix,
+                return_metadata=return_metadata,
+            )
+
+        elif upstream_prefix is not None:
             token_embeds = self.base_model.get_input_embeddings(input_ids)
             prefix = upstream_prefix.to(dtype=token_embeds.dtype, device=token_embeds.device)
             inputs_embeds = torch.cat([prefix, token_embeds], dim=1)
@@ -447,6 +537,13 @@ class Agent:
                     dtype=attention_mask.dtype,
                 )
                 attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = torch.ones(
+                    input_ids.shape[0],
+                    inputs_embeds.shape[1],
+                    device=input_ids.device,
+                    dtype=torch.long,
+                )
 
             generate_kwargs = {
                 "inputs_embeds": inputs_embeds,
@@ -461,6 +558,7 @@ class Agent:
             if do_sample:
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
+
             gen_out = generation_model.generate(**generate_kwargs)
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
             generated_ids = [sequences[row_idx].tolist() for row_idx in range(sequences.shape[0])]
@@ -482,20 +580,24 @@ class Agent:
                 "attention_mask": attention_mask,
                 "max_new_tokens": max_new_tokens,
                 "do_sample": do_sample,
-                "pad_token_id": self.base_model.tokenizer.pad_token_id,
+                "pad_token_id": pad_token_id,  # 这里统一使用前面的 pad_token_id 变量
                 "return_dict_in_generate": True,
             }
+            if eos_token_id is not None:
+                generate_kwargs["eos_token_id"] = eos_token_id
             if do_sample:
                 generate_kwargs["temperature"] = temperature
                 generate_kwargs["top_p"] = top_p
-            gen_out = generation_model.generate(
-                **generate_kwargs,
-            )
+                
+            gen_out = generation_model.generate(**generate_kwargs)
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
+            
+            prompt_len = input_ids.shape[1]
             generated_token_ids = [
-                sequences[row_idx][input_ids.shape[1]:].tolist()
+                sequences[row_idx][prompt_len:].tolist()
                 for row_idx in range(sequences.shape[0])
             ]
+            
             return self._finalize_generation_outputs(
                 tokenizer=self.base_model.tokenizer,
                 generated_token_ids=generated_token_ids,

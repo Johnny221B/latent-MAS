@@ -192,6 +192,14 @@ class BaseModelWrapper(nn.Module):
             }
         return parsed
 
+    @staticmethod
+    def _past_length(past_key_values) -> int:
+        if past_key_values is None:
+            return 0
+        if hasattr(past_key_values, "get_seq_length"):
+            return int(past_key_values.get_seq_length())
+        return int(past_key_values[0][0].shape[-2])
+
     def get_input_embeddings(self, input_ids: torch.LongTensor) -> torch.Tensor:
         """Convert token IDs to embeddings.
 
@@ -208,8 +216,40 @@ class BaseModelWrapper(nn.Module):
         input_ids: torch.LongTensor,
         attention_mask: torch.Tensor | None = None,
         prefix_embeds: torch.Tensor | None = None,
+        past_key_values=None,
         output_hidden_states: bool = True,
     ) -> dict:
+        if prefix_embeds is not None and past_key_values is not None:
+            raise ValueError("prefix_embeds and past_key_values are mutually exclusive")
+
+        if past_key_values is not None:
+            prefix_len = self._past_length(past_key_values)
+            if attention_mask is None:
+                attention_mask = torch.ones(
+                    input_ids.shape[0],
+                    prefix_len + input_ids.shape[1],
+                    device=input_ids.device,
+                    dtype=torch.long,
+                )
+
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                output_hidden_states=output_hidden_states,
+                return_dict=True,
+            )
+            raw = self._parse_model_output(outputs, output_hidden_states)
+            full_logits = raw["logits"]
+            full_last_hidden = raw["hidden_states"][-1] if raw["hidden_states"] else None
+
+            return {
+                "logits": full_logits,
+                "last_hidden_state": full_last_hidden,
+                "full_last_hidden_state": full_last_hidden,
+                "prefix_len": prefix_len,
+            }
+
         # Get token embeddings
         token_embeds = self.get_input_embeddings(input_ids)  # [B, S, D]
 
@@ -446,6 +486,7 @@ class BaseModelWrapper(nn.Module):
         input_ids: torch.LongTensor,
         attention_mask: torch.Tensor | None = None,
         prefix_embeds: torch.Tensor | None = None,
+        past_key_values=None,
         num_latent_steps: int = 40,
     ) -> dict:
         """Auto-regressive latent reasoning (LatentMAS Section 3.1).
@@ -472,32 +513,52 @@ class BaseModelWrapper(nn.Module):
         B = input_ids.shape[0]
         device = input_ids.device
 
-        # ── Step 1: Encode input (with optional prefix) ──
-        token_embeds = self.get_input_embeddings(input_ids)
-        prefix_len = 0
+        if prefix_embeds is not None and past_key_values is not None:
+            raise ValueError("prefix_embeds and past_key_values are mutually exclusive")
 
-        if prefix_embeds is not None:
-            prefix_embeds = prefix_embeds.to(dtype=token_embeds.dtype, device=device)
-            prefix_len = prefix_embeds.shape[1]
-            inputs_embeds = torch.cat([prefix_embeds, token_embeds], dim=1)
-            if attention_mask is not None:
-                prefix_mask = torch.ones(B, prefix_len, device=device, dtype=attention_mask.dtype)
-                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+        # ── Step 1: Encode input (with optional prefix or prebuilt KV cache) ──
+        if past_key_values is not None:
+            prefix_len = self._past_length(past_key_values)
+            if attention_mask is None:
+                attention_mask = torch.ones(
+                    B,
+                    prefix_len + input_ids.shape[1],
+                    device=device,
+                    dtype=torch.long,
+                )
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True,
+            )
         else:
-            inputs_embeds = token_embeds
+            token_embeds = self.get_input_embeddings(input_ids)
+            prefix_len = 0
 
-        if attention_mask is None:
-            attention_mask = torch.ones(B, inputs_embeds.shape[1], device=device, dtype=torch.long)
+            if prefix_embeds is not None:
+                prefix_embeds = prefix_embeds.to(dtype=token_embeds.dtype, device=device)
+                prefix_len = prefix_embeds.shape[1]
+                inputs_embeds = torch.cat([prefix_embeds, token_embeds], dim=1)
+                if attention_mask is not None:
+                    prefix_mask = torch.ones(B, prefix_len, device=device, dtype=attention_mask.dtype)
+                    attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                inputs_embeds = token_embeds
 
+            if attention_mask is None:
+                attention_mask = torch.ones(B, inputs_embeds.shape[1], device=device, dtype=torch.long)
 
-        # Initial forward: encode the full input, get KV cache
-        outputs = self.model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            use_cache=True,
-            output_hidden_states=True,
-            return_dict=True,
-        )
+            outputs = self.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+
         raw = self._parse_model_output(outputs, output_hidden_states=True)
         past_kv = raw["past_key_values"]
         last_hidden = raw["hidden_states"][-1][:, -1, :]  # [B, D]
@@ -511,14 +572,7 @@ class BaseModelWrapper(nn.Module):
             latent_embed = aligned.unsqueeze(1)              # [B, 1, D]
 
             # Build attention mask covering all past + new position
-            if past_kv is None:
-                past_len = 0
-            elif hasattr(past_kv, "get_seq_length"):
-                # HuggingFace DynamicCache
-                past_len = past_kv.get_seq_length()
-            else:
-                # Legacy tuple format
-                past_len = past_kv[0][0].shape[-2]
+            past_len = self._past_length(past_kv)
             latent_mask = torch.ones(
                 B, past_len + 1,
                 dtype=torch.long,
@@ -578,4 +632,3 @@ class BaseModelWrapper(nn.Module):
             if not found:
                 positions.append(0)  # fallback: prepend
         return positions
-

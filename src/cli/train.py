@@ -428,6 +428,7 @@ def load_training_checkpoint(
     compressor,
     adjacency,
     optimizer,
+    prefix_projector=None,
     batches_per_epoch: int | None = None,
     grad_accum_steps: int = 1,
     base_model_module=None,
@@ -452,6 +453,12 @@ def load_training_checkpoint(
     compressor.load_state_dict(compressor_state)
     adjacency.load_state_dict(adjacency_state)
     optimizer.load_state_dict(optimizer_state)
+
+    prefix_projector_state = checkpoint.get("prefix_projector_state")
+    if prefix_projector is not None and prefix_projector_state is not None:
+        prefix_projector.load_state_dict(prefix_projector_state)
+    elif prefix_projector is not None and prefix_projector_state is None:
+        print("Warning: checkpoint has no prefix_projector_state, using random init")
 
     if trainable_base_model:
         base_model_state = checkpoint.get("base_model_state")
@@ -553,6 +560,11 @@ def train(config_path: str, max_samples: int | None = None):
             system.compressor,
             **ddp_kwargs,
         )
+        # Wrap prefix_projector with DDP
+        system.prefix_projector = DDP(
+            system.prefix_projector,
+            **ddp_kwargs,
+        )
         # Adjacency is tiny, sync its gradients manually
         # (DDP overhead not worth it for 25 parameters)
 
@@ -622,6 +634,7 @@ def train(config_path: str, max_samples: int | None = None):
     log_interval = training_cfg.get("log_interval", 1)
     save_interval = training_cfg.get("save_interval", 500)
     compressor = system.compressor.module if is_ddp else system.compressor
+    prefix_projector = system.prefix_projector.module if is_ddp else system.prefix_projector
     trainable_base_model = training_cfg.get("train_strategy") == "full_finetune"
     base_model_module = (
         system.base_model.model.module
@@ -637,6 +650,7 @@ def train(config_path: str, max_samples: int | None = None):
             compressor=compressor,
             adjacency=adjacency,
             optimizer=optimizer,
+            prefix_projector=prefix_projector,
             batches_per_epoch=len(dataloader),
             grad_accum_steps=grad_accum_steps,
             base_model_module=base_model_module if trainable_base_model else None,
@@ -711,6 +725,7 @@ def train(config_path: str, max_samples: int | None = None):
             t0 = time.time()
             comp_grad = None
             adj_grad = None
+            proj_grad = None
             mem = None
 
             # ── Tokenize ──
@@ -760,6 +775,7 @@ def train(config_path: str, max_samples: int | None = None):
             if (batch_idx + 1) % grad_accum_steps == 0:
                 comp_grad = compute_grad_norm(compressor.parameters())
                 adj_grad = compute_grad_norm([adjacency.logits])
+                proj_grad = compute_grad_norm(prefix_projector.parameters())
                 mem = torch.cuda.max_memory_allocated(device) / 1024**3
                 torch.nn.utils.clip_grad_norm_(system.get_trainable_params(), 1.0)
                 optimizer.step()
@@ -776,6 +792,7 @@ def train(config_path: str, max_samples: int | None = None):
                             "train/graph_loss_drop": output["graph_loss_drop"].item(),
                             "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
                             "train/comp_grad": comp_grad,
+                            "train/proj_grad": proj_grad,
                             "train/adj_grad": adj_grad,
                             "train/forward_seconds": t2 - t1,
                             "train/backward_seconds": t3 - t2,
@@ -849,6 +866,7 @@ def train(config_path: str, max_samples: int | None = None):
             # ── Logging (main process only) ──
             if is_main_process() and (batch_idx + 1) % log_interval == 0:
                 display_comp_grad = comp_grad if comp_grad is not None else compute_grad_norm(compressor.parameters())
+                display_proj_grad = proj_grad if proj_grad is not None else compute_grad_norm(prefix_projector.parameters())
                 display_adj_grad = adj_grad if adj_grad is not None else compute_grad_norm([adjacency.logits])
                 display_mem = mem if mem is not None else torch.cuda.max_memory_allocated(device) / 1024**3
                 completed_batches = epoch * len(dataloader) + (batch_idx + 1)
@@ -861,7 +879,7 @@ def train(config_path: str, max_samples: int | None = None):
                     f"Loss:{output['loss'].item():.4f} "
                     f"Task:{output['task_loss'].item():.4f} "
                     f"Graph:{output['graph_loss'].item():.4f} | "
-                    f"C∇:{display_comp_grad:.6f} A∇:{display_adj_grad:.6f} | "
+                    f"C∇:{display_comp_grad:.6f} P∇:{display_proj_grad:.6f} A∇:{display_adj_grad:.6f} | "
                     f"tok:{t1-t0:.1f}s fwd:{t2-t1:.1f}s bwd:{t3-t2:.1f}s | "
                     f"mem:{display_mem:.1f}GB | "
                     f"elapsed:{format_duration(elapsed_seconds)} "
@@ -878,6 +896,7 @@ def train(config_path: str, max_samples: int | None = None):
                     "task_loss": output["task_loss"].item(),
                     "graph_loss": output["graph_loss"].item(),
                     "comp_grad": comp_grad,
+                    "proj_grad": proj_grad,
                     "adj_grad": adj_grad,
                 })
 
@@ -890,6 +909,7 @@ def train(config_path: str, max_samples: int | None = None):
                     "next_batch_idx": batch_idx + 1,
                     "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
                     "compressor_state": compressor.state_dict(),
+                    "prefix_projector_state": prefix_projector.state_dict(),
                     "adjacency_state": adjacency.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                 }, ckpt_path)
@@ -972,6 +992,7 @@ def train(config_path: str, max_samples: int | None = None):
                 "next_batch_idx": 0,
                 "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
                 "compressor_state": compressor.state_dict(),
+                "prefix_projector_state": prefix_projector.state_dict(),
                 "adjacency_state": adjacency.state_dict(),
                 "config": config,
             }, final_path)

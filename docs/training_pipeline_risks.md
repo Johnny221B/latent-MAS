@@ -23,7 +23,7 @@
 当前消息聚合公式是：
 
 $$
-z_j = \frac{\sum_{i<j} A_{ij} P_i}{\sum_{i<j} A_{ij} + \epsilon}
+z_j = \sum_{i<j} A_{ij} P_i
 $$
 
 其中：

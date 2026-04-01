@@ -81,7 +81,7 @@ $$
 
 其中 $\mathcal{N}(j)$ 表示节点 $j$ 的所有上游邻居集合，$\epsilon$ 是数值稳定项。
 
-随后，这个聚合后的消息 $z_j$ 会作为 latent prefix 注入到 agent $j$ 的输入前部，并与任务输入和角色相关提示一起送入模型。当前默认实现里，这部分“任务输入 + 角色提示”通常会先整理成 chat-format 的 `system/user` 结构，再进入模型。agent $j$ 再基于这个增强后的输入继续执行自己的 latent reasoning。
+随后，这个聚合后的消息 $z_j$ 不再直接当作输入 embedding 前缀拼接到文本序列前面，而是先通过一个 `PrefixProjector` 投影成逐层的 KV prefix。也就是说，系统会为每一层 Transformer 生成对应的 key/value 前缀状态，并在 attention 计算时把这些前缀接到该层的 KV cache 前面。当前默认实现里，文本侧的“任务输入 + 角色提示”通常仍会先整理成 chat-format 的 `system/user` 结构，再作为正常 token 输入模型；agent $j$ 则通过这些逐层 KV prefix 读取上游消息，并继续自己的 latent reasoning。
 
 这个形式化描述表达的核心思想是：agent 之间并不是通过自然语言显式交流，而是通过对内部推理过程进行压缩之后得到的连续潜空间表示来通信。
 
@@ -168,13 +168,13 @@ $$
 
 其中，$C$ 是一个可学习的共享 compressor，$P_i$ 表示由上游 agent $i$ 产生、供其所有下游节点使用的 latent message。
 
-当下游 agent $j$ 收到来自多个上游节点的 prefix 信息后，它先把这些 prefix 聚合成一个接收端 prefix，记为 $P_j^{\mathrm{recv}}$，然后把这个 prefix 拼接到自己的输入前面：
+当下游 agent $j$ 收到来自多个上游节点的 prefix 信息后，它先把这些 prefix 聚合成一个接收端 prefix，记为 $P_j^{\mathrm{recv}}$。当前实现不会把这个 prefix 直接拼成输入 token 对应的 embedding，而是先把它投影成逐层 prefix KV cache：
 
 $$
-\bigl[\, P_j^{\mathrm{recv}} ; X_j \,\bigr],
+\mathrm{KVPrefix}_j = \Pi(P_j^{\mathrm{recv}}),
 $$
 
-其中，$X_j$ 表示任务输入和 agent $j$ 的角色 prompt 对应的 token 表示。然后，agent $j$ 会在这个增强输入上继续进行自己的 latent reasoning。
+其中，$\Pi$ 表示 `PrefixProjector`，输出形状可以理解为“每层一组 prefix K/V 状态”。然后文本输入 $X_j$ 作为正常 token 序列送入模型，agent $j$ 在 attention 中通过 $\mathrm{KVPrefix}_j$ 读取上游信息并继续 latent reasoning。
 
 这种设计与 prefix tuning 的设置有较强的相似性。不同之处在于，prefix tuning 学的是一个静态 prefix 参数，而这里的 prefix 不是静态参数，而是由上游 agent 的 latent reasoning trajectory 动态生成的。因此，训练时不仅要确保下游 agent 能够学会读取并利用这些 prefix token，还必须保证在存在多个上游 agent 时，不同发送方传来的信息仍然是可区分的。
 

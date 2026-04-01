@@ -209,6 +209,18 @@ def test_e2e():
         eos_token_id = 1
         pad_token_id = 0
 
+        def batch_decode(self, token_ids, skip_special_tokens=True):
+            return [f"question-{i}" for i in range(token_ids.shape[0])]
+
+        def apply_chat_template(self, messages, tokenize=False,
+                                add_generation_prompt=True, enable_thinking=True):
+            return messages[-1]["content"]
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            if isinstance(token_ids, torch.Tensor):
+                token_ids = token_ids.tolist()
+            return " ".join(str(x) for x in token_ids)
+
         def __call__(self, texts, return_tensors=None, padding=False,
                      truncation=False, max_length=16, add_special_tokens=True, **kwargs):
             # Handle both single string and list of strings

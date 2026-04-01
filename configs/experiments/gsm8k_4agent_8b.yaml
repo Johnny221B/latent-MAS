@@ -1,5 +1,5 @@
 model:
-  name: "Qwen/Qwen3-4B"
+  name: "Qwen/Qwen3-8B"
   frozen: true
 
 graph:
@@ -15,7 +15,7 @@ compressor:
 training:
   task: "gsm8k"
   input_mode: "chat_with_prefix"
-  batch_size: 16
+  batch_size: 8
   lr: 0.0005
   weight_decay: 0.01
   epochs: 8
@@ -23,7 +23,7 @@ training:
   lambda_add: 0.0         # penalty for adding edges not in prior
   lambda_drop: 0.000      # penalty for dropping edges in prior
   lambda_sparse: 0.000    # penalty for sparsity of edges
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   log_interval: 1
   save_interval: 1000
 
@@ -32,7 +32,7 @@ reasoning:
   compress_last_k: 40       # only compress last k hidden states
 
 output:
-  dir: "outputs/gsm8k_qwen3-4b"
+  dir: "outputs/gsm8k_qwen3-8b"
   log_dir: "logs"
 
 report:

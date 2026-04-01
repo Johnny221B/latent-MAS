@@ -217,7 +217,7 @@ B. ...
 - 加载 Hugging Face 因果语言模型
 - 加载 tokenizer
 - 冻结所有模型参数
-- 提供支持 `prefix_embeds` 的前向与 latent reasoning 接口
+- 提供同时支持 `prefix_embeds` 与 `past_key_values` 的前向与 latent reasoning 接口
 
 设基础模型的隐藏维度为 $D$，词表大小为 $V$。那么对于一段输入，基础模型本质上提供从输入 embedding 到隐藏状态、再到 logits 的映射，但当前仓库不会更新这部分参数。
 
@@ -364,10 +364,10 @@ $$
 如果该 agent 有上游消息，那么其真正送入基础模型的是：
 
 $$
-[\; z_j \; ; \; \mathrm{Tok}(C_j) \;]
+\bigl(\mathrm{KVPrefix}(z_j), \mathrm{Tok}(C_j)\bigr)
 $$
 
-其中 $z_j$ 以 embedding prefix 的形式拼接在最前面。当前 latent reasoning 路径还会在 chat prompt tokenization 时显式关闭 `enable_thinking`，并把文本侧输入截断到 `2048` tokens。
+其中聚合后的 $z_j$ 会先经过 `PrefixProjector`，映射成逐层 attention 可见的 prefix KV cache；文本 token 本身仍然只是 $\mathrm{Tok}(C_j)$。当前 latent reasoning 路径还会在 chat prompt tokenization 时显式关闭 `enable_thinking`，并把文本侧输入截断到 `2048` tokens。
 
 然后 agent 调用 `latent_reasoning()`，执行 $m$ 步潜空间推理。设第 $t$ 步末尾的隐藏状态为 $h_t$，则 latent reasoning 的核心递推思想是：
 
@@ -587,12 +587,16 @@ $$
 优化器只接收：
 
 - `compressor.parameters()`
+- `prefix_projector.parameters()`
 - `adjacency.parameters()`
 
 这意味着训练真正更新的是：
 
-- 如何把 latent trajectory 压缩成 prefix
-- 图上每条边的通信强度
+- 如何把 latent trajectory 压缩成 prefix（LatentCompressor）
+- 如何把压缩后的 prefix 投影成逐层 KV cache（PrefixProjector）
+- 图上每条边的通信强度（LearnableAdjacency）
+
+其中 `PrefixProjector` 是参数量最大的可训练组件（约 125M 参数，对应 Qwen3-4B），采用 MLP 重参数化（参考 Prefix-Tuning 论文 §4.3），将 hidden_dim 维度的 prefix embedding 映射为每一层的 K/V 前缀。
 
 因此当前代码可以被理解为：
 
@@ -719,7 +723,7 @@ training:
 
 当前 Latent-MAS 代码库的训练流程可以概括为以下过程：
 
-给定一个问题-答案样本 $(x, y)$，系统首先让多个非终端 agent 在冻结语言模型上执行潜空间推理，得到各自的隐藏状态轨迹；然后将这些轨迹压缩为定长 prefix，并沿着一张可学习的 DAG 进行加权传播；最后由终端 agent 在 teacher forcing 条件下预测答案 token，并通过答案交叉熵与图结构正则的联合目标来更新通信层参数。
+给定一个问题-答案样本 $(x, y)$，系统首先让多个非终端 agent 在冻结语言模型上执行潜空间推理，得到各自的隐藏状态轨迹；然后将这些轨迹压缩为定长 prefix，通过 PrefixProjector 投影为逐层 KV cache，并沿着一张可学习的 DAG 进行加权传播；最后由终端 agent 在 teacher forcing 条件下预测答案 token，并通过答案交叉熵与图结构正则的联合目标来更新通信层参数（LatentCompressor + PrefixProjector + LearnableAdjacency）。
 
 如果用一个公式总结整个训练目标，那么就是：
 

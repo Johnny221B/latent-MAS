@@ -134,12 +134,12 @@ $$
 \texttt{input\_ids} = \mathrm{Tok}(\mathrm{Chat}(p_i, x))
 $$
 
-如果该 agent 还有来自上游的 latent prefix，那么这个 prefix 不会以文本 token 的形式拼接，而是作为 embedding 前缀 `upstream_prefix` 注入模型。
+如果该 agent 还有来自上游的 latent prefix，那么这个 prefix 不会以文本 token 的形式拼接；当前实现也不再把它直接当作输入 embedding 前缀，而是先投影成逐层 KV cache 前缀，再作为 `past_key_values` 传入模型。
 
 因此更准确的输入可写为：
 
 $$
-\text{model input}^{(i)} = [z_i ; \mathrm{Tok}(\mathrm{Chat}(p_i, x))]
+\text{model input}^{(i)} = \bigl(\mathrm{KVPrefix}(z_i), \mathrm{Tok}(\mathrm{Chat}(p_i, x))\bigr)
 $$
 
 其中 $z_i$ 是上游 agent 聚合得到的 latent prefix。
@@ -150,16 +150,16 @@ $$
 
 在训练阶段，终端 agent 使用 `forward_for_loss()`。当前默认训练路径使用的是 `training.input_mode = chat_with_prefix`，但底层实现同时支持 legacy 与 chat 两条路径。
 
-若使用 `legacy_plain_with_prefix`，输入形式为：
+若使用 `legacy_plain_with_prefix`，文本侧输入形式为：
 
 $$
-[z_T ; p_T ; x ; y]
+[p_T ; x ; y]
 $$
 
 其中：
 
 - $T$ 表示终端 agent
-- $z_T$ 是终端 agent 接收到的 latent prefix
+- $z_T$ 是终端 agent 接收到的 latent prefix，它会先被投影成逐层 KV cache，而不是直接拼进文本序列
 - $p_T$ 是终端 agent 的 role prompt
 - $x$ 是问题
 - $y$ 是标准答案
@@ -191,13 +191,13 @@ B. ...
 
 ### 5.4 终端 agent 的评测输入格式
 
-在评测阶段，终端 agent 使用 `generate_answer()`，默认仍走 `chat_with_prefix`。其输入形式可近似写为：
+在评测阶段，终端 agent 使用 `generate_answer()`，默认仍走 `chat_with_prefix`。其文本侧输入形式可近似写为：
 
 $$
-[z_T ; p_T ; x]
+[\mathrm{Chat}(p_T, x)]
 $$
 
-此时不再拼接标准答案，而是让模型自回归生成输出文本。
+如果启用了 terminal prefix，则会额外把 $z_T$ 投影成逐层 KV cache，并通过 `model.generate(..., past_key_values=...)` 注入；此时不再拼接标准答案，而是让模型自回归生成输出文本。
 
 当前评测额外还支持一个 inference-only 消融模式 `chat_with_text`。在这个模式下，通信介质不再是 latent prefix，而是文本消息。非终端 agent 会先生成文本，下游 agent 再把这些上游文本和原问题一起组织成 chat prompt。
 
@@ -244,12 +244,12 @@ $$
 如果启用了上游 latent communication，则真正送入模型的是：
 
 $$
-[z_T ; p_T ; x]
+\bigl(\mathrm{KVPrefix}(z_T), [p_T ; x]\bigr)
 $$
 
 这里的含义是：
 
-- $z_T$：上游 agent 聚合后的 latent prefix，以 embedding 前缀形式注入
+- $z_T$：上游 agent 聚合后的 latent prefix，先投影成逐层 KV cache
 - $p_T$：终端 agent 的 role prompt token
 - $x$：问题 token
 
@@ -260,7 +260,7 @@ legacy_plain_with_prefix
 
 upstream latent prefix:   [ z_T ]
 text tokens:              [ role prompt ][ question ]
-model input:              [ z_T ][ role prompt ][ question ]
+model input:              [ KV prefix cache ] + [ role prompt ][ question ]
 ```
 
 这种方式不会走 chat template，而是把 `system_prompt` 当作普通文本 token 直接拼到问题前面。
@@ -282,7 +282,7 @@ assistant:
 如果启用了上游 latent communication，则真正送入模型的是：
 
 $$
-[z_T ; \mathrm{Chat}(p_T, x)]
+\bigl(\mathrm{KVPrefix}(z_T), \mathrm{Chat}(p_T, x)\bigr)
 $$
 
 其中：
@@ -296,7 +296,7 @@ chat_with_prefix
 
 upstream latent prefix:   [ z_T ]
 chat-formatted text:      [ system: role prompt ][ user: question ][ assistant: ]
-model input:              [ z_T ][ chat-formatted text ]
+model input:              [ KV prefix cache ] + [ chat-formatted text ]
 ```
 
 因此，`chat_with_prefix` 不是“去掉了 role prompt”，而是把 role prompt 从“普通前缀 token”变成了“chat system message 的一部分”。

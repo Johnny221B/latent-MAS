@@ -3,7 +3,7 @@ set -euo pipefail
 # export CUDA_VISIBLE_DEVICES=0,1
 
 uv run --python .venv/bin/python torchrun \
-  --master_port="${MASTER_PORT:-29677}" \
+  --master_port="${MASTER_PORT:-29688}" \
   --nproc_per_node="${NPROC_PER_NODE:-2}" \
   src/cli/train.py \
   --config configs/experiments/gsm8k_4agent.yaml \

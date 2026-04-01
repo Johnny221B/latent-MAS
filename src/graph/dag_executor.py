@@ -3,7 +3,7 @@
 import torch
 
 from ..models.agent import Agent
-from ..models.compressor import LatentCompressor
+from ..models.compressor import LatentCompressor, PrefixProjector
 from ..communication.aggregator import MessageAggregator
 
 
@@ -24,6 +24,7 @@ class DAGExecutor:
         compressor: LatentCompressor,
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
+        prefix_projector: PrefixProjector | None = None,
         training: bool = True,
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
@@ -128,11 +129,17 @@ class DAGExecutor:
                     continue
 
                 # ── Non-terminal: latent reasoning → compress → pass downstream ──
+                upstream_prefix_kv = None
+                if prefix_projector is not None and upstream_prefix is not None:
+                    upstream_prefix_kv = prefix_projector(upstream_prefix)
                 agent_output = agents[j].reason(
                     task_token_ids=task_token_ids,
                     task_attention_mask=task_attention_mask,
                     upstream_prefix=upstream_prefix,
+                    upstream_prefix_kv=upstream_prefix_kv,
                 )
+                # Free KV cache early — no longer needed after reason()
+                del upstream_prefix_kv
                 S_j = agent_output["hidden_trajectory"]
                 mask_j = agent_output["compressor_mask"]
                 P_j = compressor(S_j, mask=mask_j)
@@ -152,12 +159,16 @@ class DAGExecutor:
                     )
             else:
                 # ── Terminal agent ──
+                upstream_prefix_kv = None
+                if prefix_projector is not None and upstream_prefix is not None:
+                    upstream_prefix_kv = prefix_projector(upstream_prefix)
                 if training:
                     # Training: single forward pass, return logits for CE loss
                     terminal_output = agents[j].forward_for_loss(
                         task_token_ids=task_token_ids,
                         task_attention_mask=task_attention_mask,
                         upstream_prefix=upstream_prefix,
+                        upstream_prefix_kv=upstream_prefix_kv,
                         answer_ids=answer_ids,
                         answer_mask=answer_mask,
                         input_mode=training_input_mode,
@@ -171,10 +182,19 @@ class DAGExecutor:
                         upstream_texts = collect_upstream_texts(j)
                         terminal_upstream_prefix = None
                         used_upstream_prefix = False
+                    terminal_prefix_kv = upstream_prefix_kv if inference_mode != "chat_with_text" else None
+                    terminal_prefix_len = 0
+                    if terminal_prefix_kv is not None:
+                        if hasattr(terminal_prefix_kv, "get_seq_length"):
+                            terminal_prefix_len = int(terminal_prefix_kv.get_seq_length())
+                        elif len(terminal_prefix_kv) > 0:
+                            terminal_prefix_len = int(terminal_prefix_kv[0][0].shape[-2])
                     generation = agents[j].generate_answer(
                         task_token_ids=task_token_ids,
                         task_attention_mask=task_attention_mask,
                         upstream_prefix=terminal_upstream_prefix,
+                        upstream_prefix_kv=terminal_prefix_kv,
+                        prefix_len=terminal_prefix_len,
                         upstream_texts=[upstream_texts for _ in range(task_token_ids.shape[0])]
                         if upstream_texts is not None
                         else None,

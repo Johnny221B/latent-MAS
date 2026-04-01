@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 
 from ..models.base_model import BaseModelWrapper
-from ..models.compressor import LatentCompressor
+from ..models.compressor import LatentCompressor, PrefixProjector
 from ..models.agent import Agent
 from ..graph.adjacency import (
     LearnableAdjacency,
@@ -36,6 +36,10 @@ from ..graph.dag_executor import DAGExecutor
 from ..communication.aggregator import MessageAggregator
 from ..losses.task_loss import TaskLoss
 from ..losses.graph_loss import GraphLoss
+
+
+def _get_kv_head_dim(hf_config) -> int:
+    return getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
 
 
 class MultiAgentSystem(nn.Module):
@@ -112,6 +116,15 @@ class MultiAgentSystem(nn.Module):
             num_layers=compressor_cfg.get("num_layers", 1),
             target_norm=target_norm,
         )
+        
+        hf_config = self.base_model.model.config
+        self.prefix_projector = PrefixProjector(
+            num_layers=hf_config.num_hidden_layers,
+            hidden_dim=hf_config.hidden_size,
+            num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
+            head_dim=_get_kv_head_dim(hf_config),
+            cache_config=hf_config,
+        )
 
         # ── Trainable: Adjacency ──
         self.adjacency = LearnableAdjacency(
@@ -144,17 +157,6 @@ class MultiAgentSystem(nn.Module):
         do_sample: bool = True,
         collect_agent_logs: bool = False,
     ) -> dict:
-        """Full forward pass.
-
-        Training (answer_ids provided):
-            non-terminal agents: latent reasoning → compress → prefix
-            terminal agent: forward_for_loss([prefix; role; question; answer]) → logits
-            loss computed on answer positions only
-
-        Inference (answer_ids is None):
-            non-terminal agents: latent reasoning → compress → prefix
-            terminal agent: generate_answer([prefix; role; question]) → text
-        """
         A = self.adjacency.get_adjacency()
         is_training = answer_ids is not None
 
@@ -162,6 +164,7 @@ class MultiAgentSystem(nn.Module):
             agents=self.agents,
             adjacency=A,
             compressor=self.compressor,
+            prefix_projector=self.prefix_projector, # prefix
             task_token_ids=task_token_ids,
             task_attention_mask=task_attention_mask,
             training=is_training,
@@ -223,6 +226,7 @@ class MultiAgentSystem(nn.Module):
             params.extend(self.base_model.model.parameters())
         params.extend(self.compressor.parameters())
         params.extend(self.adjacency.parameters())
+        params.extend(self.prefix_projector.parameters())
         return params
 
     def log_adjacency(self) -> str:

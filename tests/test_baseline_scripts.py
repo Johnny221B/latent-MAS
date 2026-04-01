@@ -269,9 +269,9 @@ def test_forward_for_loss_can_use_chat_with_prefix_prompt_shape():
         def device(self):
             return torch.device("cpu")
 
-        def __call__(self, input_ids, attention_mask=None, prefix_embeds=None, output_hidden_states=True):
+        def __call__(self, input_ids, attention_mask=None, prefix_embeds=None, past_key_values=None, output_hidden_states=True):
             batch_size, seq_len = input_ids.shape
-            return {"logits": torch.zeros(batch_size, seq_len, 13)}
+            return {"logits": torch.zeros(batch_size, seq_len, 13), "prefix_len": 0}
 
     import torch
 
@@ -315,9 +315,9 @@ def test_forward_for_loss_legacy_prefix_length_matches_trimmed_logits():
         def device(self):
             return torch.device("cpu")
 
-        def __call__(self, input_ids, attention_mask=None, prefix_embeds=None, output_hidden_states=True):
+        def __call__(self, input_ids, attention_mask=None, prefix_embeds=None, past_key_values=None, output_hidden_states=True):
             batch_size, seq_len = input_ids.shape
-            return {"logits": torch.zeros(batch_size, seq_len, 11)}
+            return {"logits": torch.zeros(batch_size, seq_len, 11), "prefix_len": 0}
 
     import torch
 

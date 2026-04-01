@@ -85,7 +85,7 @@ flowchart LR
 flowchart TD
     A[Terminal Agent Receives Aggregated Prefix] --> B{Training or Eval}
 
-    B -->|Training| C[Build Input: prefix + chat prompt + answer]
+    B -->|Training| C[Build Input: chat prompt + answer, plus projected KV prefix]
     C --> D[forward_for_loss]
     D --> E[Return Logits]
     E --> F[Compute CE Task Loss]
@@ -93,8 +93,8 @@ flowchart TD
     B -->|Eval| G[Build Generation Input]
     G --> H{Use Terminal Prefix?}
 
-    H -->|Yes| I[Prefix + Prompt Prefill]
-    I --> J[Manual Token-by-Token Generation Loop]
+    H -->|Yes| I[Prompt Tokens + past_key_values Prefill]
+    I --> J[HF generate() with KV prefix]
     J --> K[Return generation metadata]
 
     H -->|No| L[Question/Prompt Only]
@@ -120,7 +120,7 @@ flowchart LR
 
 - 开启 `--no-terminal-prefix` 时，前面 agent 还是会照常跑
 - 只是最后一个 agent 在生成答案时不使用上游 prefix
-- 这通常会更快，因为会绕开当前的手写逐 token 生成路径
+- 这通常会更快，因为会少掉 prefix projector 与长 KV cache 上下文带来的额外开销
 
 ## 5. Eval Logging Workflow
 
@@ -160,7 +160,7 @@ flowchart TD
 
 1. 多个非终端 agent 是串行执行的，不是并行执行的。
 2. 每个非终端 agent 都要做 `m` 步 latent reasoning。
-3. 终端 agent 在使用 terminal prefix 时，会走手写逐 token 生成路径。
+3. 终端 agent 在使用 terminal prefix 时，仍然需要先准备 prefix projector 产出的 KV cache，并让 `generate()` 在较长上下文上工作。
 4. 对 `gsm8k` 这类答案任务，当前默认 `max_new_tokens` 已提高到 `4096`，终端生成长度上限更大。
 5. 每条样本结束后都会刷新 JSON 结果文件。
 
