@@ -114,3 +114,17 @@ F: Hierarchical-6    planner → (analyst, critic, verifier) → refiner → sol
 | 28729106 | arch-sequential-4agent (no SP) | running |
 | 28731986 | eval sequential-4agent (full) | submitted |
 | pending | arch: two_path, hierarchical_4, diamond_5, hierarchical_6 | waiting |
+
+
+---
+
+## Auto-tracked Results
+
+_Auto-updated by `scripts/monitor_experiments.sh`_
+
+| Date | Model | Graph | AMP | Epochs | BS | GSM8K | Output Dir |
+|------|-------|-------|-----|--------|----|-------|-----------|
+| 04-04 | Qwen3-4B | chain_4agent | True | ? | 4 | **93.75%** (45/48) | `sequential_4agent_no_sp_20260404_025743` |
+| 04-04 | Qwen3-4B | dense_4agent | True | ? | 4 | **100.00%** (8/8) | `dense_4agent_20260404_053819` |
+| 04-04 | Qwen3-4B | diamond_5agent | True | ? | 4 | **97.22%** (35/36) | `diamond_5agent_20260404_053819` |
+| 04-04 | Qwen3-4B | hierarchical_4agent | True | ? | 4 | **100.00%** (12/12) | `hierarchical_4agent_20260404_063508` |
