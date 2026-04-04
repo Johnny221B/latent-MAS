@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-CKPT_FOLDER="${CKPT_FOLDER:-outputs/gsm8k_qwen3-4b_20260331_010342}"
+CKPT_FOLDER="${CKPT_FOLDER:-outputs/gsm8k_qwen3-4b_20260402_172227}"
 DATASET_NAME="${DATASET_NAME:-gsm8k}"
 
 uv run --python .venv/bin/python torchrun \
-  --master_port="${MASTER_PORT:-29633}" \
+  --master_port="${MASTER_PORT:-29655}" \
   --nproc_per_node=1 \
   src/cli/evaluate.py \
     --config "${CKPT_FOLDER}/config.yaml" \

@@ -1,10 +1,11 @@
 model:
-  name: "Qwen/Qwen3-8B"
+  name: "/home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218"
   frozen: true
 
 graph:
   config: "configs/graphs/chain_4agent.json"
   roles_dir: "configs/roles"
+  init_scale: 2.0
 
 compressor:
   num_queries: 16        # Lp: output prefix length
@@ -14,15 +15,17 @@ compressor:
 
 training:
   task: "gsm8k"
-  input_mode: "chat_with_prefix"
+  input_mode: chat_with_prefix
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
   batch_size: 8
   lr: 0.0005
+  adjacency_lr: 0.05
   weight_decay: 0.01
-  epochs: 8
+  epochs: 2
   max_seq_len: 4096
-  lambda_add: 0.0         # penalty for adding edges not in prior
-  lambda_drop: 0.000      # penalty for dropping edges in prior
-  lambda_sparse: 0.000    # penalty for sparsity of edges
+  lambda_add: 0.1
+  lambda_drop: 0.5
+  lambda_sparse: 0.01
   gradient_accumulation_steps: 2
   log_interval: 1
   save_interval: 1000
@@ -32,7 +35,7 @@ reasoning:
   compress_last_k: 40       # only compress last k hidden states
 
 output:
-  dir: "outputs/gsm8k_qwen3-8b"
+  dir: "outputs/graph_v2/gsm8k_qwen3-8b"
   log_dir: "logs"
 
 report:

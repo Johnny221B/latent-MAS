@@ -425,6 +425,7 @@ class BaseModelWrapper(nn.Module):
                 "prefix_len": prefix_len,
             }
             
+    @torch.amp.autocast("cuda", enabled=False)
     def compute_alignment_matrix(self, lambda_reg: float = 1e-5) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute input-output alignment matrix W_a (LatentMAS Eq. 3).
 
@@ -455,6 +456,7 @@ class BaseModelWrapper(nn.Module):
         self._cached_alignment = (W_a, target_norm)
         return W_a, target_norm
 
+    @torch.amp.autocast("cuda", enabled=False)
     def apply_alignment(self, hidden: torch.Tensor) -> torch.Tensor:
         """Map last-layer hidden state back to input embedding space.
 

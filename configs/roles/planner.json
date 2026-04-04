@@ -1,6 +1,6 @@
 {
     "role_name": "planner",
-    "system_prompt": "You are a Planner Agent. Given an input question, design a clear, step-by-step plan for how to solve the question. Your outlined plan should be concise with a few bullet points for each step. Do not produce the final answer.",
+    "role_prompt": "You are a Planner Agent. Given an input question, design a clear, step-by-step plan for how to solve the question.\nYour outlined plan should be concise with a few bullet points for each step. Do not produce the final answer.\nNow output your plan to solve the question below:",
     "reasoning_steps": 40,
     "compress_last_k": 40
 }

@@ -72,7 +72,7 @@ class _LocalJsonlDataset:
             self._file_handle.close()
 
 
-def _load_local_train_split(split: str):
+def _load_local_train_split(split: str, source: str | None = None):
     if split != "train":
         raise ValueError("am_deepseek_r1_distilled only supports the 'train' split")
 
@@ -83,7 +83,19 @@ def _load_local_train_split(split: str):
             f"{train_path}. Run scripts/prepare_am_deepseek_r1_distilled.py first."
         )
 
-    return _LocalJsonlDataset(train_path)
+    dataset = _LocalJsonlDataset(train_path)
+
+    if source is not None:
+        sources = {s.strip() for s in source.split(",")}
+        filtered_indices = []
+        for i in range(len(dataset)):
+            row = dataset[i]
+            if row.get("source", "unknown") in sources:
+                filtered_indices.append(i)
+        print(f"Filtered by source={source}: {len(filtered_indices)}/{len(dataset)} samples")
+        dataset = dataset.select(filtered_indices)
+
+    return dataset
 
 
 def build_task_configs() -> dict:
@@ -94,6 +106,6 @@ def build_task_configs() -> dict:
             "question_id_field": "question_id",
             "question_field": "question",
             "answer_field": "answer",
-            "extra_fields": ("subset",),
+            "extra_fields": ("subset", "source"),
         }
     }

@@ -38,9 +38,18 @@ def extract_answer(text: str, task_type: str = "gsm8k") -> str:
 def _extract_gsm8k(text: str) -> str:
     """Extract numeric answer from GSM8K-style output.
 
-    Looks for patterns like "#### 42" or "The answer is 42".
+    Priority: <answer> tag > #### pattern > "answer is" pattern > last number.
     """
-    # Try "#### <number>" pattern first
+    # Try <answer> tag first (matches training data format)
+    match = re.search(r"<answer>\s*(.*?)\s*</answer>", text, re.DOTALL)
+    if match:
+        answer_text = match.group(1).strip()
+        numbers = re.findall(r"-?[\d,]+\.?\d*", answer_text)
+        if numbers:
+            return _normalize_numeric_text(numbers[-1])
+        return answer_text
+
+    # Try "#### <number>" pattern
     match = re.search(r"####\s*(-?[\d,]+\.?\d*)", text)
     if match:
         return _normalize_numeric_text(match.group(1))

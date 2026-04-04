@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 
 from ..models.base_model import BaseModelWrapper
-from ..models.compressor import LatentCompressor, PrefixProjector
+from ..models.compressor import LatentCompressor, PrefixProjector, HiddenProjection
 from ..models.agent import Agent
 from ..graph.adjacency import (
     LearnableAdjacency,
@@ -70,14 +70,55 @@ class MultiAgentSystem(nn.Module):
             terminal_agent_index=self.terminal_agent_index,
         )
 
-        # ── Load base model (frozen, shared) ──
-        self.base_model = BaseModelWrapper(
-            model_name=config["model"]["name"],
-            cache_dir=config["model"].get("cache_dir"),
-            dtype=config["model"].get("dtype"),
-        )
+        # ── Load base models ──
+        # Support heterogeneous models: config.model can specify per-agent models
+        # via "agent_models" dict mapping agent index/role to a model key,
+        # and "models" dict mapping model keys to model paths.
+        #
+        # Homogeneous (default):
+        #   model:
+        #     name: "path/to/model"
+        #
+        # Heterogeneous:
+        #   model:
+        #     name: "path/to/primary_model"        # default / terminal model
+        #     models:
+        #       primary: "path/to/large_model"
+        #       secondary: "path/to/small_model"
+        #     agent_models: [primary, secondary, secondary, secondary, primary, primary]
+        #
+        model_cfg = config["model"]
+        agent_model_assignments = model_cfg.get("agent_models", None)
+
+        if agent_model_assignments and "models" in model_cfg:
+            # ── Heterogeneous: load each unique model once ──
+            models_dict = model_cfg["models"]
+            self._base_models = nn.ModuleDict()
+            for model_key, model_path in models_dict.items():
+                self._base_models[model_key] = BaseModelWrapper(
+                    model_name=model_path,
+                    cache_dir=model_cfg.get("cache_dir"),
+                    dtype=model_cfg.get("dtype"),
+                )
+            # Map each agent index to its model key
+            self._agent_model_keys = agent_model_assignments
+            # Primary model = the one used by the terminal agent
+            terminal_model_key = agent_model_assignments[self.terminal_agent_index]
+            self.base_model = self._base_models[terminal_model_key]
+        else:
+            # ── Homogeneous: single shared model (backward compatible) ──
+            self.base_model = BaseModelWrapper(
+                model_name=model_cfg["name"],
+                cache_dir=model_cfg.get("cache_dir"),
+                dtype=model_cfg.get("dtype"),
+            )
+            self._base_models = None
+            self._agent_model_keys = None
+
         if config.get("training", {}).get("train_strategy") == "full_finetune":
             self.base_model.set_trainable(True)
+
+        # Canonical hidden_dim = primary (terminal) model's dimension
         hidden_dim = self.base_model.hidden_dim
 
         # ── Create agents ──
@@ -92,21 +133,59 @@ class MultiAgentSystem(nn.Module):
                 role_config["reasoning_steps"] = config["reasoning"]["steps_per_agent"]
             if "compress_last_k" in config["reasoning"]:
                 role_config["compress_last_k"] = config["reasoning"]["compress_last_k"]
+            global_sp = config.get("training", {}).get("global_system_prompt", None)
+            if global_sp:
+                sp_path = Path(global_sp)
+                if sp_path.is_file():
+                    if sp_path.suffix == ".json":
+                        import json as _json
+                        role_config["global_system_prompt"] = _json.loads(sp_path.read_text())["system_prompt"]
+                    else:
+                        role_config["global_system_prompt"] = sp_path.read_text().strip()
+                else:
+                    role_config["global_system_prompt"] = global_sp
+            # Assign per-agent model
+            if self._base_models is not None:
+                agent_base_model = self._base_models[self._agent_model_keys[i]]
+            else:
+                agent_base_model = self.base_model
             agent = Agent(
                 agent_id=i,
                 role_config=role_config,
-                base_model=self.base_model,
+                base_model=agent_base_model,
                 max_seq_len=config["training"].get("max_seq_len", 512),
             )
             self.agents.append(agent)
 
-        # ── Trainable: Compressor ──
-        # ── Compute target norm from input embeddings ──
+        # ── Trainable: Hidden projections (for heterogeneous models) ──
+        # If an agent's model has a different hidden_dim than the canonical dim,
+        # create a projection layer to align it before compression.
+        self.hidden_projections = nn.ModuleDict()
+        if self._base_models is not None:
+            for model_key, model_wrapper in self._base_models.items():
+                if model_wrapper.hidden_dim != hidden_dim:
+                    self.hidden_projections[model_key] = HiddenProjection(
+                        source_dim=model_wrapper.hidden_dim,
+                        target_dim=hidden_dim,
+                    )
+        # Build per-agent projection index for DAGExecutor
+        # None means no projection needed (same dim as canonical)
+        self._agent_projection_keys = []
+        for i in range(self.n_agents):
+            if self._agent_model_keys is not None:
+                key = self._agent_model_keys[i]
+                if key in self.hidden_projections:
+                    self._agent_projection_keys.append(key)
+                else:
+                    self._agent_projection_keys.append(None)
+            else:
+                self._agent_projection_keys.append(None)
+
+        # ── Trainable: Compressor (operates in canonical hidden_dim) ──
         with torch.no_grad():
             embed_weight = self.base_model.model.get_input_embeddings().weight
             target_norm = embed_weight.norm(dim=1).mean().item()
 
-        # ── Trainable: Compressor ──
         compressor_cfg = config.get("compressor", {})
         self.compressor = LatentCompressor(
             hidden_dim=hidden_dim,
@@ -116,21 +195,39 @@ class MultiAgentSystem(nn.Module):
             num_layers=compressor_cfg.get("num_layers", 1),
             target_norm=target_norm,
         )
-        
-        hf_config = self.base_model.model.config
-        self.prefix_projector = PrefixProjector(
-            num_layers=hf_config.num_hidden_layers,
-            hidden_dim=hf_config.hidden_size,
-            num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
-            head_dim=_get_kv_head_dim(hf_config),
-            cache_config=hf_config,
-        )
+
+        # ── Trainable: PrefixProjectors (per unique model architecture) ──
+        # Each model type needs its own PrefixProjector because KV cache
+        # structure (num_layers, num_kv_heads, head_dim) differs per model.
+        if self._base_models is not None:
+            self.prefix_projectors = nn.ModuleDict()
+            for model_key, model_wrapper in self._base_models.items():
+                hf_cfg = model_wrapper.model.config
+                self.prefix_projectors[model_key] = PrefixProjector(
+                    num_layers=hf_cfg.num_hidden_layers,
+                    hidden_dim=hidden_dim,  # input is always canonical dim
+                    num_kv_heads=getattr(hf_cfg, "num_key_value_heads", hf_cfg.num_attention_heads),
+                    head_dim=_get_kv_head_dim(hf_cfg),
+                    cache_config=hf_cfg,
+                )
+            self.prefix_projector = None  # use per-model projectors instead
+        else:
+            hf_config = self.base_model.model.config
+            self.prefix_projector = PrefixProjector(
+                num_layers=hf_config.num_hidden_layers,
+                hidden_dim=hf_config.hidden_size,
+                num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
+                head_dim=_get_kv_head_dim(hf_config),
+                cache_config=hf_config,
+            )
+            self.prefix_projectors = None
 
         # ── Trainable: Adjacency ──
+        graph_init_scale = float(config.get("graph", {}).get("init_scale", 6.0))
         self.adjacency = LearnableAdjacency(
             prior=prior,
             allowed_edges_mask=allowed_edges_mask,
-            init_scale=6.0,
+            init_scale=graph_init_scale,
         )
 
         # ── Executor (stateless) ──
@@ -164,7 +261,7 @@ class MultiAgentSystem(nn.Module):
             agents=self.agents,
             adjacency=A,
             compressor=self.compressor,
-            prefix_projector=self.prefix_projector, # prefix
+            prefix_projector=self.prefix_projector,
             task_token_ids=task_token_ids,
             task_attention_mask=task_attention_mask,
             training=is_training,
@@ -178,6 +275,11 @@ class MultiAgentSystem(nn.Module):
             execution_order=self.execution_order,
             terminal_agent_index=self.terminal_agent_index,
             training_input_mode=self.training_input_mode,
+            # Heterogeneous model support
+            hidden_projections=self.hidden_projections if self.hidden_projections else None,
+            agent_projection_keys=self._agent_projection_keys,
+            prefix_projectors=self.prefix_projectors,
+            agent_model_keys=self._agent_model_keys,
         )
 
         result = {"adjacency": A}
@@ -226,7 +328,14 @@ class MultiAgentSystem(nn.Module):
             params.extend(self.base_model.model.parameters())
         params.extend(self.compressor.parameters())
         params.extend(self.adjacency.parameters())
-        params.extend(self.prefix_projector.parameters())
+        # Hidden projections (heterogeneous model alignment)
+        if self.hidden_projections:
+            params.extend(self.hidden_projections.parameters())
+        # Prefix projectors
+        if self.prefix_projectors is not None:
+            params.extend(self.prefix_projectors.parameters())
+        elif self.prefix_projector is not None:
+            params.extend(self.prefix_projector.parameters())
         return params
 
     def log_adjacency(self) -> str:

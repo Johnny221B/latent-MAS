@@ -1,0 +1,43 @@
+model:
+  name: "Qwen/Qwen3-4B"
+  frozen: true
+
+graph:
+  config: "configs/graphs/chain_4agent.json"
+  roles_dir: "configs/roles"
+
+compressor:
+  num_queries: 16        # Lp: output prefix length
+  num_heads: 8           # attention heads in cross-attn
+  dropout: 0.1
+  num_layers: 1
+
+training:
+  task: "gsm8k"
+  input_mode: "chat_with_prefix"
+  batch_size: 16
+  lr: 0.0005
+  weight_decay: 0.01
+  epochs: 2
+  max_seq_len: 4096
+  lambda_add: 0.1         # penalty for adding edges not in prior
+  lambda_drop: 0.5        # penalty for dropping edges in prior
+  lambda_sparse: 0.01     # penalty for sparsity of edges
+  gradient_accumulation_steps: 1
+  log_interval: 1
+  save_interval: 1000
+
+reasoning:
+  steps_per_agent: 40       # total generation tokens per agent
+  compress_last_k: 40       # only compress last k hidden states
+
+output:
+  dir: "outputs/graph/gsm8k_qwen3-4b"
+  log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

@@ -1,0 +1,39 @@
+model:
+  name: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+  frozen: true
+graph:
+  config: configs/graphs/chain_4agent.json
+  roles_dir: configs/roles
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+  num_layers: 2
+training:
+  task: gsm8k
+  input_mode: chat_with_prefix
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
+  batch_size: 16
+  lr: 0.0005
+  weight_decay: 0.01
+  epochs: 5
+  max_seq_len: 4096
+  lambda_add: 0.0
+  lambda_drop: 0.0
+  lambda_sparse: 0.0
+  gradient_accumulation_steps: 1
+  log_interval: 1
+  save_interval: 1000
+reasoning:
+  steps_per_agent: 40
+  compress_last_k: 40
+output:
+  dir: outputs/gsm8k-4b-ep5-s40-q16-cl2
+  log_dir: logs
+report:
+  use_wandb: true
+  project: latent-mas
+  run_name: gsm8k-4b-ep5-s40-q16-cl2
+  key_env: WANDB_API_KEY
+  env_file: .env
+  mode: online

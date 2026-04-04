@@ -1,0 +1,61 @@
+model:
+  name: "/home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218"
+  frozen: true
+
+graph:
+  config: "configs/graphs/chain_4agent.json"
+  roles_dir: "configs/roles"
+  init_scale: 2.0
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+  num_layers: 1
+
+training:
+  task: "am_deepseek_r1_distilled"
+  # source: filter training data by source (comma-separated). Available sources:
+  #   Math (230k):    openR1Math_extended(63k), NuminaMath_1.5(62k), openR1Math_default(62k),
+  #                   MATH_metamathQA(14k), PRIME(10k), prime(8k), MATH_numina(4k),
+  #                   MetaMathQA(393), MATH-lighteval(399), Omni-MATH(268), aime(58), limo(119)
+  #   Code (288k):    KodCode(211k), codeio(55k), OpenCoder(22k), OpenCoderStage2(27k)
+  #   Reason (354k):  natural_reasoning(319k), openThoughts(35k), openThoughts_other(73)
+  #   General (434k): InfinityInstruct(307k), GeneralThought-Feb25(51k), Dolphin-R1(32k),
+  #                   dolphin_R1_other(32k), open_orca(13k)
+  #   Multi-lang (39k): evol-en(22k), evol-zh(17k)
+  #   Other (34k):    data_ablation_full59K(14k), am-0309(13k), Bespoke17k(6k), s1K-1.1(231)
+  source: "MATH_metamathQA"
+  train_strategy: "communication_only"
+  input_mode: "chat_with_prefix"
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
+  batch_size: 4
+  lr: 0.00001
+  adjacency_lr: 0.01
+  weight_decay: 0.01
+  epochs: 2
+  max_seq_len: 8192
+  lambda_add: 0.1
+  lambda_drop: 0.5
+  lambda_sparse: 0.01
+  gradient_accumulation_steps: 16
+  log_interval: 1
+  save_interval: 5000
+
+evaluation:
+  run_after_train: false
+
+reasoning:
+  steps_per_agent: 40
+  compress_last_k: 40
+
+output:
+  dir: "outputs/graph_v2/am_deepseek_r1_8b"
+  log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

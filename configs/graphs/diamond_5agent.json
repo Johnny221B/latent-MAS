@@ -1,0 +1,13 @@
+{
+    "agents": ["planner", "analyst", "critic", "refiner", "solver"],
+    "adjacency_prior": [
+        [0, 1, 1, 0, 0],
+        [0, 0, 0, 1, 0],
+        [0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 0]
+    ],
+    "execution_order": [0, 1, 2, 3, 4],
+    "terminal_agent_index": 4,
+    "description": "Diamond: planner->(analyst,critic)->refiner->solver. Skip-connection free."
+}

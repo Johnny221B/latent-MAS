@@ -18,5 +18,5 @@ def get_task_configs() -> dict:
     return task_configs
 
 
-def create_dataset(task: str, split: str = "train", max_samples: int | None = None) -> MultiAgentDataset:
-    return MultiAgentDataset(task=task, split=split, max_samples=max_samples)
+def create_dataset(task: str, split: str = "train", max_samples: int | None = None, **loader_kwargs) -> MultiAgentDataset:
+    return MultiAgentDataset(task=task, split=split, max_samples=max_samples, **loader_kwargs)

@@ -29,6 +29,14 @@ def build_question_id(subset: str, user_content: str, assistant_content: str) ->
     return f"am-r1-{digest}"
 
 
+def extract_source(messages: list[dict]) -> str:
+    for message in messages:
+        info = message.get("info")
+        if info and info.get("source"):
+            return str(info["source"])
+    return "unknown"
+
+
 def normalize_row(row: dict, subset: str) -> dict:
     messages = row["messages"]
     user_content = extract_message_content(messages, role="user")
@@ -39,6 +47,7 @@ def normalize_row(row: dict, subset: str) -> dict:
         "question": user_content,
         "answer": assistant_content,
         "subset": subset,
+        "source": extract_source(messages),
     }
 
 

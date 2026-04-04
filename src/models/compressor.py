@@ -20,6 +20,25 @@ import torch.nn as nn
 from transformers.cache_utils import DynamicCache
 
 
+class HiddenProjection(nn.Module):
+    """Projects hidden states from one dimension to another.
+
+    Used in heterogeneous setups where small-model agents produce hidden states
+    with a different dimension than the canonical communication dimension.
+    """
+
+    def __init__(self, source_dim: int, target_dim: int):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(source_dim, target_dim),
+            nn.LayerNorm(target_dim),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """[B, S, D_source] -> [B, S, D_target]"""
+        return self.proj(hidden_states)
+
+
 class LatentCompressor(nn.Module):
     """Cross-attention compressor: variable-length input -> fixed-length prefix."""
 
@@ -135,7 +154,10 @@ class PrefixProjector(nn.Module):
         # 调换维度以便后续分离: -> [num_layers, 2, B, num_kv_heads, Lp, head_dim]
         kv_out = kv_out.permute(2, 3, 0, 4, 1, 5)
         
-        cache = DynamicCache(config=self.cache_config) if self.cache_config is not None else DynamicCache()
+        try:
+            cache = DynamicCache(config=self.cache_config) if self.cache_config is not None else DynamicCache()
+        except TypeError:
+            cache = DynamicCache()
         for layer_idx in range(self.num_layers):
             k = kv_out[layer_idx, 0]  # [B, num_kv_heads, Lp, head_dim]
             v = kv_out[layer_idx, 1]  # [B, num_kv_heads, Lp, head_dim]

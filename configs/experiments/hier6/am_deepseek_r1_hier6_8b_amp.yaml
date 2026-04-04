@@ -1,0 +1,52 @@
+model:
+  name: "Qwen/Qwen3-8B"
+  frozen: true
+
+graph:
+  config: "configs/graphs/hierarchical_6agent.json"
+  roles_dir: "configs/roles"
+  init_scale: 2.0
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+  num_layers: 1
+
+training:
+  task: "am_deepseek_r1_distilled"
+  source: "MATH_metamathQA"
+  train_strategy: "communication_only"
+  input_mode: "chat_with_prefix"
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
+  batch_size: 4
+  lr: 0.00001
+  adjacency_lr: 0.01
+  weight_decay: 0.01
+  epochs: 2
+  max_seq_len: 8192
+  lambda_add: 0.1
+  lambda_drop: 0.5
+  lambda_sparse: 0.01
+  gradient_accumulation_steps: 16
+  log_interval: 1
+  save_interval: 5000
+  use_amp: true
+
+evaluation:
+  run_after_train: false
+
+reasoning:
+  steps_per_agent: 40
+  compress_last_k: 40
+
+output:
+  dir: "outputs/hier6/am_deepseek_r1_8b_amp"
+  log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

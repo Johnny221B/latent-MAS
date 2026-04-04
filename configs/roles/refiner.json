@@ -1,6 +1,6 @@
 {
     "role_name": "refiner",
-    "system_prompt": "You are a Refiner Agent. You receive latent-format information containing a previous plan with feedback. Based on this, write a refined and improved step-by-step plan to solve the question. Make sure your output plan is correct and concise.",
+    "role_prompt": "You are a Refiner Agent to provide a refined step-by-step plan for solving the given question.\nYou are provided with:\n(1) compressed latent prefix tokens: a previous plan with feedback from upstream agent reasoning\n(2) text-format information: the input question you need to solve.\nBased on the input, write a refined and improved plan to solve the question. Make sure your output plan is correct and concise.\nNow, output your refined plan below:",
     "reasoning_steps": 40,
     "compress_last_k": 40
 }

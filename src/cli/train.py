@@ -429,6 +429,7 @@ def load_training_checkpoint(
     adjacency,
     optimizer,
     prefix_projector=None,
+    prefix_projectors=None,
     batches_per_epoch: int | None = None,
     grad_accum_steps: int = 1,
     base_model_module=None,
@@ -455,9 +456,13 @@ def load_training_checkpoint(
     optimizer.load_state_dict(optimizer_state)
 
     prefix_projector_state = checkpoint.get("prefix_projector_state")
-    if prefix_projector is not None and prefix_projector_state is not None:
+    if prefix_projectors is not None and isinstance(prefix_projector_state, dict):
+        for key, state in prefix_projector_state.items():
+            if key in prefix_projectors:
+                prefix_projectors[key].load_state_dict(state)
+    elif prefix_projector is not None and prefix_projector_state is not None:
         prefix_projector.load_state_dict(prefix_projector_state)
-    elif prefix_projector is not None and prefix_projector_state is None:
+    elif (prefix_projector is not None or prefix_projectors is not None) and prefix_projector_state is None:
         print("Warning: checkpoint has no prefix_projector_state, using random init")
 
     if trainable_base_model:
@@ -560,22 +565,58 @@ def train(config_path: str, max_samples: int | None = None):
             system.compressor,
             **ddp_kwargs,
         )
-        # Wrap prefix_projector with DDP
-        system.prefix_projector = DDP(
-            system.prefix_projector,
-            **ddp_kwargs,
-        )
+        # Wrap prefix_projector(s) with DDP
+        if system.prefix_projectors is not None:
+            for key in list(system.prefix_projectors.keys()):
+                system.prefix_projectors[key] = DDP(
+                    system.prefix_projectors[key],
+                    **ddp_kwargs,
+                )
+        elif system.prefix_projector is not None:
+            system.prefix_projector = DDP(
+                system.prefix_projector,
+                **ddp_kwargs,
+            )
+        # Wrap hidden_projections with DDP
+        if system.hidden_projections:
+            for key in list(system.hidden_projections.keys()):
+                system.hidden_projections[key] = DDP(
+                    system.hidden_projections[key],
+                    **ddp_kwargs,
+                )
         # Adjacency is tiny, sync its gradients manually
         # (DDP overhead not worth it for 25 parameters)
 
     # ── Dataset ──
     if is_main_process():
         print(f"\nLoading dataset: {training_cfg['task']}...")
+    loader_kwargs = {}
+    if training_cfg.get("source"):
+        loader_kwargs["source"] = training_cfg["source"]
     dataset = create_dataset(
         task=training_cfg["task"],
         split="train",
         max_samples=max_samples,
+        **loader_kwargs,
     )
+
+    # ── Filter out samples exceeding max_seq_len ──
+    max_seq_len = training_cfg.get("max_seq_len", 2048)
+    tokenizer = system.base_model.tokenizer
+    valid_indices = []
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        q_len = len(tokenizer.encode(sample["question"], add_special_tokens=True))
+        a_len = len(tokenizer.encode(sample["answer"], add_special_tokens=False))
+        if q_len + a_len <= max_seq_len:
+            valid_indices.append(i)
+    n_filtered = len(dataset) - len(valid_indices)
+    if n_filtered > 0:
+        if is_main_process():
+            print(f"Filtered {n_filtered} samples exceeding max_seq_len={max_seq_len} "
+                  f"({len(valid_indices)}/{len(dataset)} remaining)")
+        dataset = Subset(dataset, valid_indices)
+
     probe_dataset = None
     probe_indices = []
     if probe_cfg.get("enabled", False):
@@ -623,18 +664,69 @@ def train(config_path: str, max_samples: int | None = None):
         print(f"Batches per epoch per GPU: {len(dataloader)}")
 
     # ── Optimizer ──
-    optimizer = AdamW(
-        system.get_trainable_params(),
-        lr=float(training_cfg["lr"]),
-        weight_decay=float(training_cfg.get("weight_decay", 0.01)),
-    )
+    base_lr = float(training_cfg["lr"])
+    adj_lr = float(training_cfg.get("adjacency_lr", base_lr))
+    weight_decay = float(training_cfg.get("weight_decay", 0.01))
+
+    non_adj_params = []
+    if training_cfg.get("train_strategy") == "full_finetune":
+        non_adj_params.extend(system.base_model.model.parameters())
+    non_adj_params.extend(system.compressor.parameters())
+    if system.prefix_projectors is not None:
+        non_adj_params.extend(system.prefix_projectors.parameters())
+    elif system.prefix_projector is not None:
+        non_adj_params.extend(system.prefix_projector.parameters())
+    if system.hidden_projections:
+        non_adj_params.extend(system.hidden_projections.parameters())
+
+    param_groups = [
+        {"params": non_adj_params, "lr": base_lr},
+        {"params": list(system.adjacency.parameters()), "lr": adj_lr},
+    ]
+    optimizer = AdamW(param_groups, weight_decay=weight_decay)
+    if is_main_process() and adj_lr != base_lr:
+        print(f"Using separate adjacency lr: {adj_lr} (base lr: {base_lr})")
+
+    # ── LR Scheduler ──
+    warmup_steps = int(training_cfg.get("warmup_steps", 0))
+    total_training_steps = training_cfg["epochs"] * len(dataloader) // max(training_cfg.get("gradient_accumulation_steps", 1), 1)
+    scheduler = None
+    if warmup_steps > 0:
+        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=1e-2,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=max(total_training_steps - warmup_steps, 1),
+            eta_min=float(base_lr) * 0.01,
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+        if is_main_process():
+            print(f"LR schedule: {warmup_steps} warmup steps + cosine decay over {total_training_steps} total steps")
 
     # ── Training loop ──
     grad_accum_steps = training_cfg.get("gradient_accumulation_steps", 1)
     log_interval = training_cfg.get("log_interval", 1)
     save_interval = training_cfg.get("save_interval", 500)
     compressor = system.compressor.module if is_ddp else system.compressor
-    prefix_projector = system.prefix_projector.module if is_ddp else system.prefix_projector
+    # Unwrap prefix_projector(s) for checkpoint save/load
+    if system.prefix_projectors is not None:
+        prefix_projector = None
+        prefix_projectors_unwrapped = {
+            k: (v.module if is_ddp else v)
+            for k, v in system.prefix_projectors.items()
+        }
+    else:
+        prefix_projector = system.prefix_projector.module if is_ddp and system.prefix_projector is not None else system.prefix_projector
+        prefix_projectors_unwrapped = None
     trainable_base_model = training_cfg.get("train_strategy") == "full_finetune"
     base_model_module = (
         system.base_model.model.module
@@ -651,6 +743,7 @@ def train(config_path: str, max_samples: int | None = None):
             adjacency=adjacency,
             optimizer=optimizer,
             prefix_projector=prefix_projector,
+            prefix_projectors=prefix_projectors_unwrapped,
             batches_per_epoch=len(dataloader),
             grad_accum_steps=grad_accum_steps,
             base_model_module=base_model_module if trainable_base_model else None,
@@ -708,6 +801,13 @@ def train(config_path: str, max_samples: int | None = None):
     skip_batches_in_start_epoch = (
         resume_state["skip_batches_in_epoch"] if resume_state is not None else 0
     )
+    # ── Mixed Precision ──
+    use_amp = bool(training_cfg.get("use_amp", True))
+    amp_dtype = torch.bfloat16 if use_amp else None
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
+    if is_main_process() and use_amp:
+        print(f"Mixed precision enabled (dtype={amp_dtype})")
+
     train_start = time.time()
     total_batches = training_cfg["epochs"] * len(dataloader)
     for epoch in range(start_epoch, training_cfg["epochs"]):
@@ -753,34 +853,49 @@ def train(config_path: str, max_samples: int | None = None):
             t1 = time.time()
 
             # ── Forward ──
-            output = system(
-                task_token_ids=task_token_ids,
-                task_attention_mask=task_attention_mask,
-                answer_ids=answer_ids,
-                answer_mask=answer_mask,
-            )
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                output = system(
+                    task_token_ids=task_token_ids,
+                    task_attention_mask=task_attention_mask,
+                    answer_ids=answer_ids,
+                    answer_mask=answer_mask,
+                )
 
             t2 = time.time()
 
             # ── Backward ──
             loss = output["loss"] / grad_accum_steps
-            loss.backward()
+            scaler.scale(loss).backward()
 
             t3 = time.time()
 
-            # ── Sync adjacency gradients across GPUs (manual allreduce) ──
-            if is_ddp and adjacency.logits.grad is not None:
-                dist.all_reduce(adjacency.logits.grad, op=dist.ReduceOp.AVG)
-
             if (batch_idx + 1) % grad_accum_steps == 0:
+                # ── Sync adjacency gradients across GPUs (manual allreduce) ──
+                # Must be inside the accumulation gate so it runs once per optimizer step,
+                # not once per micro-batch (which would shrink adj gradients).
+                if is_ddp and adjacency.logits.grad is not None:
+                    dist.all_reduce(adjacency.logits.grad, op=dist.ReduceOp.AVG)
+                mem = torch.cuda.max_memory_allocated(device) / 1024**3
+                scaler.unscale_(optimizer)
+                # Compute grad norms AFTER unscale so they reflect true magnitudes
                 comp_grad = compute_grad_norm(compressor.parameters())
                 adj_grad = compute_grad_norm([adjacency.logits])
-                proj_grad = compute_grad_norm(prefix_projector.parameters())
-                mem = torch.cuda.max_memory_allocated(device) / 1024**3
+                if prefix_projectors_unwrapped is not None:
+                    proj_grad = compute_grad_norm(
+                        [p for pp in prefix_projectors_unwrapped.values() for p in pp.parameters()]
+                    )
+                elif prefix_projector is not None:
+                    proj_grad = compute_grad_norm(prefix_projector.parameters())
+                else:
+                    proj_grad = 0.0
                 torch.nn.utils.clip_grad_norm_(system.get_trainable_params(), 1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
+                if scheduler is not None:
+                    scheduler.step()
                 global_step += 1
                 if is_main_process():
+                    current_lr = optimizer.param_groups[0]["lr"]
                     log_wandb(
                         wandb_run,
                         {
@@ -800,6 +915,7 @@ def train(config_path: str, max_samples: int | None = None):
                             "train/max_memory_gb": mem,
                             "train/epoch": epoch + 1,
                             "train/batch": batch_idx + 1,
+                            "train/lr": current_lr,
                         },
                         step=global_step,
                     )
@@ -866,7 +982,16 @@ def train(config_path: str, max_samples: int | None = None):
             # ── Logging (main process only) ──
             if is_main_process() and (batch_idx + 1) % log_interval == 0:
                 display_comp_grad = comp_grad if comp_grad is not None else compute_grad_norm(compressor.parameters())
-                display_proj_grad = proj_grad if proj_grad is not None else compute_grad_norm(prefix_projector.parameters())
+                if proj_grad is not None:
+                    display_proj_grad = proj_grad
+                elif prefix_projectors_unwrapped is not None:
+                    display_proj_grad = compute_grad_norm(
+                        [p for pp in prefix_projectors_unwrapped.values() for p in pp.parameters()]
+                    )
+                elif prefix_projector is not None:
+                    display_proj_grad = compute_grad_norm(prefix_projector.parameters())
+                else:
+                    display_proj_grad = 0.0
                 display_adj_grad = adj_grad if adj_grad is not None else compute_grad_norm([adjacency.logits])
                 display_mem = mem if mem is not None else torch.cuda.max_memory_allocated(device) / 1024**3
                 completed_batches = epoch * len(dataloader) + (batch_idx + 1)
@@ -909,9 +1034,15 @@ def train(config_path: str, max_samples: int | None = None):
                     "next_batch_idx": batch_idx + 1,
                     "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
                     "compressor_state": compressor.state_dict(),
-                    "prefix_projector_state": prefix_projector.state_dict(),
+                    "prefix_projector_state": (
+                        {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
+                        if prefix_projectors_unwrapped is not None
+                        else prefix_projector.state_dict() if prefix_projector is not None
+                        else None
+                    ),
                     "adjacency_state": adjacency.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
                 }, ckpt_path)
                 print(f"  Saved: {ckpt_path}")
 
@@ -992,7 +1123,12 @@ def train(config_path: str, max_samples: int | None = None):
                 "next_batch_idx": 0,
                 "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
                 "compressor_state": compressor.state_dict(),
-                "prefix_projector_state": prefix_projector.state_dict(),
+                "prefix_projector_state": (
+                    {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
+                    if prefix_projectors_unwrapped is not None
+                    else prefix_projector.state_dict() if prefix_projector is not None
+                    else None
+                ),
                 "adjacency_state": adjacency.state_dict(),
                 "config": config,
             }, final_path)

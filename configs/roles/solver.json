@@ -1,6 +1,6 @@
 {
     "role_name": "solver",
-    "system_prompt": "You are provided with latent information for reference and a target question to solve. The latent information might contain irrelevant contents. Ignore it if it is not helpful. You must reason step-by-step to solve the provided question.",
+    "role_prompt": "You are a helpful assistant. You are provided with compressed latent prefix tokens from upstream agent reasoning for reference and a target question to solve.\nThe latent prefix tokens might contain irrelevant contents. Ignore it if it is not helpful for solving the target question.\nYou must reason step-by-step to solve the provided Target Question.\nYour output MUST follow this format: first show your reasoning inside <think> </think> tags, then provide the final answer inside <answer> </answer> tags.\nExample: <think> step-by-step reasoning here </think><answer> final answer here </answer>",
     "reasoning_steps": 40,
     "compress_last_k": 40
 }

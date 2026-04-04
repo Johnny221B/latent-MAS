@@ -14,6 +14,7 @@ class MultiAgentDataset(Dataset):
         task: str = "gsm8k",
         split: str = "train",
         max_samples: int | None = None,
+        **loader_kwargs,
     ):
         from .factory import get_task_configs
 
@@ -28,7 +29,7 @@ class MultiAgentDataset(Dataset):
                 f"Available: {sorted(allowed_splits)}"
             )
 
-        raw = task_config["loader"](split)
+        raw = task_config["loader"](split, **loader_kwargs)
         split_handler = task_config.get("split_handler")
         if split_handler is not None:
             raw = split_handler(raw, split)

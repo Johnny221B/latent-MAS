@@ -1,0 +1,14 @@
+{
+    "agents": ["planner", "analyst", "critic", "verifier", "refiner", "solver"],
+    "adjacency_prior": [
+        [0, 1, 1, 1, 0, 0],
+        [0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 0, 0]
+    ],
+    "execution_order": [0, 1, 2, 3, 4, 5],
+    "terminal_agent_index": 5,
+    "description": "Hierarchical 6-agent: planner fans out to analyst/critic/verifier (parallel), all three merge into refiner, refiner feeds solver"
+}

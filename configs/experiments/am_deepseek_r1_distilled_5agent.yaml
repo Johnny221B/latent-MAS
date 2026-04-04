@@ -1,10 +1,10 @@
 model:
   name: "Qwen/Qwen3-4B"
   frozen: true
-  dtype: "bfloat16"
+  # dtype: "bfloat16"
 
 graph:
-  config: "configs/graphs/default_5agent.json"
+  config: "configs/graphs/chain_4agent.json"
   roles_dir: "configs/roles"
 
 compressor:
@@ -16,21 +16,22 @@ training:
   task: "am_deepseek_r1_distilled"
   train_strategy: "communication_only"
   input_mode: "chat_with_prefix"
-  batch_size: 2
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
+  batch_size: 1
   lr: 0.00005
   weight_decay: 0.01
   epochs: 1
   max_seq_len: 8192
   lambda_add: 0.1
-  lambda_drop: 0.005
-  lambda_sparse: 0.005
+  lambda_drop: 0.05
+  lambda_sparse: 0.01
   gradient_accumulation_steps: 2
   log_interval: 1
   save_interval: 5000
   # resume_from_checkpoint: "outputs/am_deepseek_r1_distilled_qwen3-4b_20260326_130242/checkpoint_step3000.pt"
 
 training_probe:
-  enabled: true
+  enabled: false
   samples: 0
   seed: 42
   every_n_steps: 10

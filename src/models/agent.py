@@ -41,7 +41,8 @@ class Agent:
         self.agent_id = agent_id
         self.role_config = role_config
         self.role_name = role_config["role_name"]
-        self.system_prompt = role_config["system_prompt"]
+        self.role_prompt = role_config.get("role_prompt", role_config.get("system_prompt", ""))
+        self.system_prompt = role_config.get("global_system_prompt", None)
         self.reasoning_steps = role_config.get("reasoning_steps", 40)
         self.base_model = base_model
         self.max_seq_len = max_seq_len
@@ -55,10 +56,10 @@ class Agent:
         return self.base_model.device
 
     def _get_role_token_ids(self) -> torch.LongTensor:
-        """Tokenize the system prompt once and cache it."""
+        """Tokenize the role prompt once and cache it."""
         if self._role_tokens is None:
             encoded = self.base_model.tokenizer(
-                self.system_prompt,
+                self.role_prompt,
                 return_tensors="pt",
                 add_special_tokens=False,
             )
@@ -86,19 +87,25 @@ class Agent:
         tokenizer,
         question_text: str,
         system_prompt: str | None = None,
+        role_prompt: str | None = None,
         upstream_messages: list[str] | None = None,
         enable_thinking: bool = True,
     ) -> str:
         messages = []
         if system_prompt and system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt.strip()})
-        user_content = question_text
+        # Build user content: role_prompt + question
+        parts = []
+        if role_prompt and role_prompt.strip():
+            parts.append(role_prompt.strip())
         if upstream_messages:
             formatted_messages = "\n\n".join(
                 f"[Upstream message {idx + 1}]\n{message}"
                 for idx, message in enumerate(upstream_messages)
             )
-            user_content = f"{formatted_messages}\n\n[Question]\n{question_text}"
+            parts.append(formatted_messages)
+        parts.append(question_text)
+        user_content = "\n".join(parts)
         messages.append({"role": "user", "content": user_content})
         return tokenizer.apply_chat_template(
             messages,
@@ -142,6 +149,7 @@ class Agent:
                 tokenizer=self.base_model.tokenizer,
                 question_text=question_text,
                 system_prompt=self.system_prompt,
+                role_prompt=self.role_prompt,
                 upstream_messages=(messages if inference_mode == "chat_with_text" else None),
                 enable_thinking=False,
             )
@@ -281,6 +289,7 @@ class Agent:
                 tokenizer=self.base_model.tokenizer,
                 question_text=q,
                 system_prompt=self.system_prompt,
+                role_prompt=self.role_prompt,
                 enable_thinking=False,
             )
             for q in question_texts
