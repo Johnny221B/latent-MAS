@@ -1149,6 +1149,7 @@ def evaluate(
     question: str | None = None,
     output_dir: str | Path | None = None,
     eval_config_path: str | None = None,
+    model_dtype: str | None = None,
 ):
     config = merge_eval_config(config_path, eval_config_path)
     evaluation_cfg = config.get("evaluation", {})
@@ -1171,6 +1172,12 @@ def evaluate(
     if is_main_process(rank):
         print(f"Device: {device}")
         print(f"World size: {world_size}")
+
+    # ── Override model dtype if requested ──
+    if model_dtype is not None:
+        config.setdefault("model", {})["dtype"] = model_dtype
+        if is_main_process(rank):
+            print(f"Overriding model dtype to: {model_dtype}")
 
     # ── Build system ──
     if is_main_process(rank):
@@ -1761,6 +1768,8 @@ if __name__ == "__main__":
         help="Also run the embedded single-model baseline after ours eval.",
     )
     parser.add_argument("--do-sample", action="store_true")
+    parser.add_argument("--dtype", type=str, default=None, choices=["float32", "bfloat16", "float16"],
+                        help="Override model dtype for eval (default: use training config)")
     parser.add_argument("--no-agent-logs", action="store_true")
     parser.add_argument("--worker", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -1781,4 +1790,5 @@ if __name__ == "__main__":
         question=args.question,
         output_dir=args.output_dir,
         eval_config_path=args.eval_config,
+        model_dtype=args.dtype,
     )
