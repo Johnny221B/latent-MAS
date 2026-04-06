@@ -164,3 +164,4 @@ _Auto-updated by `scripts/monitor_experiments.sh`_
 | 04-05 | Qwen3-4B | chain_4agent | True | ? | 8 | **95.31%** (61/64) | `competition_math_sequential_4agent_1ep_bf16_think_20260405_134422` |
 | 04-06 | Qwen3-4B | chain_4agent | True | ? | 4 | **50.00%** (6/12) | `sequential_4agent_bf16_20260405_213221` |
 | 04-06 | Qwen3-1.7B+Qwen3-4B | hierarchical_6agent | True | ? | 8 | **95.31%** (61/64) | `competition_math_hier6_4b_1.7b_4ep_bf16_think_20260406_043621` |
+| 04-06 | Qwen3-1.7B+Qwen3-4B | hierarchical_6agent | True | ? | 8 | **96.88%** (31/32) | `competition_math_hier6_4b_1.7b_2ep_bf16_think_lowreg_20260406_085643` |

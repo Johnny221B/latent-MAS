@@ -162,6 +162,7 @@ def write_eval_snapshot(
     total: int,
     time_seconds: float,
     *,
+    valid: int | None = None,
     avg_sample_seconds: float | None = None,
     avg_generated_tokens: float | None = None,
     avg_tokens_per_second: float | None = None,
@@ -172,13 +173,20 @@ def write_eval_snapshot(
     comparison: dict | None = None,
 ) -> None:
     accuracy = correct / total * 100 if total > 0 else 0.0
+    if valid is None:
+        valid = total
+    truncated = total - valid
+    valid_accuracy = correct / valid * 100 if valid > 0 else 0.0
     payload = {
         "method": method,
         "task": task,
         "metrics": {
             "accuracy": accuracy,
+            "valid_accuracy": valid_accuracy,
             "correct": correct,
             "total": total,
+            "valid": valid,
+            "truncated": truncated,
             "time_seconds": time_seconds,
             "avg_sample_seconds": avg_sample_seconds,
             "avg_generated_tokens": avg_generated_tokens,
@@ -840,9 +848,9 @@ def evaluate_loaded_system(
                         for key, value in generation.items()
                     }
                     truncated = not sample_generation.get("stopped_early", True)
-                    pred = "" if truncated else extract_answer(batch_generated_text[sample_idx], task_type=task)
+                    pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
                     gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
-                    is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
+                    is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
                     local_update.append(
                         {
                             "question": batch_questions[sample_idx],
@@ -921,6 +929,7 @@ def evaluate_loaded_system(
                 task=task,
                 correct=correct,
                 total=total,
+                valid=valid,
                 time_seconds=time.time() - t_start,
                 avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
                 avg_generated_tokens=(
@@ -1052,9 +1061,9 @@ def evaluate_loaded_system(
                     max_new_tokens=generation_max_new_tokens,
                 )
                 truncated = not generation.get("stopped_early", True)
-                pred = "" if truncated else extract_answer(baseline_text, task_type=task)
+                pred = extract_answer(baseline_text, task_type=task)
                 gold = batch["answers"][sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch["answers"][sample_idx], task_type=task)
-                is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
+                is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
                 baseline_update.append(
                     {
                         "question_id": batch["question_ids"][sample_idx],
@@ -1411,9 +1420,9 @@ def evaluate(
                         for key, value in generation.items()
                     }
                     truncated = not sample_generation.get("stopped_early", True)
-                    pred = "" if truncated else extract_answer(batch_generated_text[sample_idx], task_type=task)
+                    pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
                     gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
-                    is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
+                    is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
                     local_update.append(
                         {
                             "question": batch_questions[sample_idx],
@@ -1478,6 +1487,7 @@ def evaluate(
                 task=task,
                 correct=correct,
                 total=total,
+                valid=valid,
                 time_seconds=time.time() - t_start,
                 avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
                 avg_generated_tokens=(sum(generated_token_counts) / len(generated_token_counts)) if generated_token_counts else None,
@@ -1667,9 +1677,9 @@ def evaluate(
                 )
 
                 truncated = not generation.get("stopped_early", True)
-                pred = "" if truncated else extract_answer(baseline_text, task_type=task)
+                pred = extract_answer(baseline_text, task_type=task)
                 gold = batch["answers"][sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch["answers"][sample_idx], task_type=task)
-                is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
+                is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
                 baseline_update.append(
                     {
                         "question_id": batch["question_ids"][sample_idx],
