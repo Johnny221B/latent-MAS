@@ -1,0 +1,43 @@
+compressor:
+  dropout: 0.1
+  num_heads: 8
+  num_layers: 1
+  num_queries: 16
+evaluation:
+  run_after_train: false
+graph:
+  config: configs/graphs/hierarchical_6agent.json
+  init_scale: 2.0
+  roles_dir: configs/roles
+model:
+  frozen: true
+  name: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
+output:
+  dir: outputs/arch_gsm8k_4ep_8b/hierarchical_6agent
+  log_dir: logs
+reasoning:
+  compress_last_k: 40
+  steps_per_agent: 40
+report:
+  env_file: .env
+  key_env: WANDB_API_KEY
+  mode: online
+  project: latent-mas
+  use_wandb: true
+training:
+  adjacency_lr: 0.01
+  batch_size: 2
+  epochs: 4
+  gradient_accumulation_steps: 16
+  input_mode: chat_with_prefix
+  lambda_add: 0.1
+  lambda_drop: 0.5
+  lambda_sparse: 0.01
+  log_interval: 1
+  lr: 1.0e-05
+  max_seq_len: 8192
+  save_interval: 5000
+  task: gsm8k
+  train_strategy: communication_only
+  use_amp: true
+  weight_decay: 0.01

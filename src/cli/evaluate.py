@@ -30,7 +30,7 @@ from torch.utils.data import Subset
 from tqdm.auto import tqdm
 
 from src.utils.config import load_config
-from src.utils.answer_extraction import extract_answer
+from src.utils.answer_extraction import extract_answer, math_is_equivalent, MATH_EQUIVALENT_TASKS
 from src.pipeline.multi_agent_system import MultiAgentSystem
 from src.data import create_dataset
 from src.models.agent import Agent
@@ -405,8 +405,6 @@ def _evaluate_loaded_system_humaneval(
     evaluation_cfg = config.get("evaluation", {})
     num_samples_per_task = int(evaluation_cfg.get("num_samples_per_task", 1))
     pass_at_k = list(evaluation_cfg.get("pass_at_k", [1]))
-    split_scheme = evaluation_cfg.get("split_scheme", "debug_60_40")
-
     if max_samples is not None and max_samples < 0:
         max_samples = None
 
@@ -424,83 +422,108 @@ def _evaluate_loaded_system_humaneval(
 
     sample_rows: list[dict] = []
     agent_log_rows: list[dict] = []
+    sample_durations: list[float] = []
+    generated_token_counts: list[int] = []
     t_start = time.time()
-    progress = _build_progress_iterator(len(dataloader), desc="HumanEval", rank=rank)
+
+    local_steps = len(dataloader)
+    step_counts = gather_sharded_objects(local_steps, rank, world_size)
+    max_steps = max(step_counts)
+    dataloader_iter = iter(dataloader)
+
+    progress = _build_progress_iterator(max_steps, desc="HumanEval", rank=rank)
 
     with torch.no_grad():
-        for batch in dataloader:
-            tokenized = system.base_model.tokenize(
-                batch["questions"],
-                max_length=config["training"].get("max_seq_len", 2048),
-            )
-            task_ids = tokenized["input_ids"].to(device)
-            task_mask = tokenized["attention_mask"].to(device)
+        for idx in progress:
+            local_update = None
+            t0 = time.time()
 
-            output = system(
-                task_token_ids=task_ids,
-                task_attention_mask=task_mask,
-                max_new_tokens=max_new_tokens,
-                inference_mode=inference_mode,
-                use_terminal_prefix=use_terminal_prefix,
-                do_sample=do_sample,
-                collect_agent_logs=write_agent_logs,
-            )
-
-            generated_text = output["generated_text"]
-            generation = output.get("generation", {})
-            agent_logs = output.get("agent_logs", [])
-            batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
-            batch_question_ids = batch["question_ids"]
-            batch_questions = batch["questions"]
-            batch_answers = batch["answers"]
-            batch_size_actual = len(batch_questions)
-            for sample_idx in range(batch_size_actual):
-                sample_generation = {
-                    key: _select_batch_item(value, sample_idx)
-                    for key, value in generation.items()
-                }
-                sample_rows.append(
-                    {
-                        "task_id": str(batch_question_ids[sample_idx]),
-                        "completion": batch_generated_text[sample_idx],
-                        "question": batch_questions[sample_idx],
-                    }
+            if idx < local_steps:
+                batch = next(dataloader_iter)
+                tokenized = system.base_model.tokenize(
+                    batch["questions"],
+                    max_length=config["training"].get("max_seq_len", 2048),
                 )
-                if write_agent_logs:
-                    agent_log_rows.append(
-                        build_agent_sample_log(
-                            question_id=batch_question_ids[sample_idx],
-                            question=batch_questions[sample_idx],
-                            gold=batch_answers[sample_idx],
-                            prediction=batch_generated_text[sample_idx],
-                            generation=sample_generation,
-                            correct=False,
-                            agent_logs=agent_logs,
-                        )
-                    )
-            if is_main_process(rank):
+                task_ids = tokenized["input_ids"].to(device)
+                task_mask = tokenized["attention_mask"].to(device)
+
+                output = system(
+                    task_token_ids=task_ids,
+                    task_attention_mask=task_mask,
+                    max_new_tokens=max_new_tokens,
+                    inference_mode=inference_mode,
+                    use_terminal_prefix=use_terminal_prefix,
+                    do_sample=do_sample,
+                    collect_agent_logs=write_agent_logs,
+                )
+
+                generated_text = output["generated_text"]
+                generation = output.get("generation", {})
+                agent_logs = output.get("agent_logs", [])
+                batch_generated_text = generated_text if isinstance(generated_text, list) else [generated_text]
+                batch_question_ids = batch["question_ids"]
+                batch_questions = batch["questions"]
+                batch_answers = batch["answers"]
+                batch_size_actual = len(batch_questions)
+                batch_elapsed = time.time() - t0
+                per_sample_seconds = batch_elapsed / max(batch_size_actual, 1)
+                local_update = []
                 for sample_idx in range(batch_size_actual):
                     sample_generation = {
                         key: _select_batch_item(value, sample_idx)
                         for key, value in generation.items()
                     }
+                    local_update.append(
+                        {
+                            "task_id": str(batch_question_ids[sample_idx]),
+                            "completion": batch_generated_text[sample_idx],
+                            "question": batch_questions[sample_idx],
+                            "answer": batch_answers[sample_idx],
+                            "generation": sample_generation,
+                            "sample_seconds": per_sample_seconds,
+                            "agent_log": build_agent_sample_log(
+                                question_id=batch_question_ids[sample_idx],
+                                question=batch_questions[sample_idx],
+                                gold=batch_answers[sample_idx],
+                                prediction=batch_generated_text[sample_idx],
+                                generation=sample_generation,
+                                correct=False,
+                                agent_logs=agent_logs,
+                            ) if write_agent_logs else None,
+                        }
+                    )
+
+            gathered_updates = gather_sharded_objects(local_update, rank, world_size)
+
+            if not is_main_process(rank):
+                continue
+
+            for shard_updates in gathered_updates:
+                if shard_updates is None:
+                    continue
+                for shard_update in shard_updates:
+                    sample_durations.append(shard_update["sample_seconds"])
+                    generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
+                    sample_rows.append(
+                        {
+                            "task_id": shard_update["task_id"],
+                            "completion": shard_update["completion"],
+                            "question": shard_update["question"],
+                        }
+                    )
+                    if write_agent_logs and shard_update["agent_log"] is not None:
+                        agent_log_rows.append(shard_update["agent_log"])
                     _print_token_limit_warning(
-                        question_id=str(batch_question_ids[sample_idx]),
-                        question=batch_questions[sample_idx],
-                        prediction=batch_generated_text[sample_idx],
-                        generation=sample_generation,
+                        question_id=shard_update["task_id"],
+                        question=shard_update["question"],
+                        prediction=shard_update["completion"],
+                        generation=shard_update["generation"],
                         max_new_tokens=max_new_tokens,
                     )
-                if hasattr(progress, "update"):
-                    progress.update(1)
     _close_progress_iterator(progress)
 
-    gathered_rows = gather_sharded_objects(sample_rows, rank, world_size)
-    gathered_agent_logs = gather_sharded_objects(agent_log_rows, rank, world_size)
-    all_rows = [row for shard_rows in gathered_rows for row in (shard_rows or [])]
-    all_agent_log_rows = [
-        row for shard_rows in gathered_agent_logs for row in (shard_rows or [])
-    ]
+    all_rows = sample_rows
+    all_agent_log_rows = agent_log_rows
 
     if not is_main_process(rank):
         if is_dist:
@@ -512,7 +535,7 @@ def _evaluate_loaded_system_humaneval(
     samples_path = output_dir / "humaneval_samples.jsonl"
     _write_jsonl(
         samples_path,
-        [{"task_id": row["task_id"], "completion": row["completion"]} for row in all_rows],
+        [{"task_id": row["task_id"], "completion": extract_answer(row["completion"], task_type="humaneval")} for row in all_rows],
     )
 
     harness_result = _evaluate_humaneval_samples(
@@ -524,6 +547,22 @@ def _evaluate_loaded_system_humaneval(
         output_dir=output_dir,
     )
 
+    # Merge harness pass/fail results back into samples
+    results_path = Path(harness_result["results_path"])
+    if results_path.exists():
+        harness_by_task = {}
+        with results_path.open() as f:
+            for line in f:
+                row = json.loads(line)
+                harness_by_task[row["task_id"]] = {
+                    "passed": row.get("passed", False),
+                    "result": row.get("result", ""),
+                }
+        for row in all_rows:
+            hr = harness_by_task.get(row["task_id"], {})
+            row["passed"] = hr.get("passed", False)
+            row["result"] = hr.get("result", "")
+
     eval_path = output_dir / "eval_results.json"
     agent_log_path = output_dir / "agent_logs.json"
     role_agent_log_dir = output_dir / "agent_log"
@@ -534,7 +573,15 @@ def _evaluate_loaded_system_humaneval(
         "num_samples_per_task": num_samples_per_task,
         "total_samples": len(all_rows),
         "pass_at_k": pass_at_k,
-        "split_scheme": split_scheme,
+        "avg_sample_seconds": (sum(sample_durations) / len(sample_durations)) if sample_durations else None,
+        "avg_generated_tokens": (
+            sum(generated_token_counts) / len(generated_token_counts)
+        ) if generated_token_counts else None,
+        "avg_tokens_per_second": (
+            (sum(generated_token_counts) / sum(sample_durations))
+            if sample_durations and sum(sample_durations) > 0
+            else None
+        ),
     }
     parameters = {
         "config_path": config_path,
@@ -548,7 +595,6 @@ def _evaluate_loaded_system_humaneval(
         "write_agent_logs": write_agent_logs,
         "worker": worker,
         "batch_size": batch_size,
-        "split_scheme": split_scheme,
         "config": copy.deepcopy(config),
     }
     artifacts = {
@@ -723,6 +769,7 @@ def evaluate_loaded_system(
 
     correct = 0
     total = 0
+    valid = 0
     results = []
     agent_log_results = []
     sample_durations = []
@@ -792,9 +839,10 @@ def evaluate_loaded_system(
                         key: _select_batch_item(value, sample_idx)
                         for key, value in generation.items()
                     }
-                    pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
-                    gold = extract_answer(batch_answers[sample_idx], task_type=task)
-                    is_correct = pred.strip() == gold.strip()
+                    truncated = not sample_generation.get("stopped_early", True)
+                    pred = "" if truncated else extract_answer(batch_generated_text[sample_idx], task_type=task)
+                    gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
+                    is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
                     local_update.append(
                         {
                             "question": batch_questions[sample_idx],
@@ -803,6 +851,7 @@ def evaluate_loaded_system(
                             "prediction": pred,
                             "generation": sample_generation,
                             "correct": is_correct,
+                            "truncated": truncated,
                             "agent_log": build_agent_sample_log(
                                 question_id=batch_question_ids[sample_idx],
                                 question=batch_questions[sample_idx],
@@ -828,6 +877,8 @@ def evaluate_loaded_system(
                     if shard_update["correct"]:
                         correct += 1
                     total += 1
+                    if not shard_update.get("truncated", False):
+                        valid += 1
                     sample_durations.append(shard_update["sample_seconds"])
                     generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
                     sample_result = {
@@ -837,6 +888,7 @@ def evaluate_loaded_system(
                         "prediction": shard_update["prediction"],
                         "generation": shard_update["generation"],
                         "correct": shard_update["correct"],
+                        "truncated": shard_update.get("truncated", False),
                     }
                     if write_agent_logs and shard_update["agent_log"] is not None:
                         agent_log_results.append(shard_update["agent_log"])
@@ -909,9 +961,14 @@ def evaluate_loaded_system(
     print(f"{'='*60}")
     print(f"  Task:     {task}")
     print(f"  Split:    {split}")
+    truncated_count = total - valid
+    valid_accuracy = correct / valid * 100 if valid > 0 else 0.0
     print(f"  Samples:  {total}")
+    print(f"  Valid:    {valid} ({valid/total*100:.1f}%)" if total > 0 else f"  Valid:    0")
+    print(f"  Truncated:{truncated_count}")
     print(f"  Correct:  {correct}")
-    print(f"  Accuracy: {accuracy:.2f}%")
+    print(f"  Accuracy: {accuracy:.2f}% (over all samples)")
+    print(f"  Valid Acc:{valid_accuracy:.2f}% (over valid samples only)")
     print(f"  Time:     {t_total:.1f}s ({t_total/max(total, 1):.1f}s/sample)")
     if sample_durations:
         print(f"  Avg sample: {sum(sample_durations)/len(sample_durations):.2f}s")
@@ -926,8 +983,11 @@ def evaluate_loaded_system(
         "task": task,
         "metrics": {
             "accuracy": accuracy,
+            "valid_accuracy": valid_accuracy,
             "correct": correct,
             "total": total,
+            "valid": valid,
+            "truncated": total - valid,
             "time_seconds": t_total,
             "avg_sample_seconds": (sum(sample_durations) / len(sample_durations)) if sample_durations else None,
             "avg_generated_tokens": (
@@ -991,8 +1051,10 @@ def evaluate_loaded_system(
                     eos_token_id=system.base_model.tokenizer.eos_token_id,
                     max_new_tokens=generation_max_new_tokens,
                 )
-                pred = extract_answer(baseline_text, task_type=task)
-                gold = extract_answer(batch["answers"][sample_idx], task_type=task)
+                truncated = not generation.get("stopped_early", True)
+                pred = "" if truncated else extract_answer(baseline_text, task_type=task)
+                gold = batch["answers"][sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch["answers"][sample_idx], task_type=task)
+                is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
                 baseline_update.append(
                     {
                         "question_id": batch["question_ids"][sample_idx],
@@ -1000,7 +1062,8 @@ def evaluate_loaded_system(
                         "gold": gold,
                         "prediction": pred,
                         "generation": generation,
-                        "correct": pred.strip() == gold.strip(),
+                        "correct": is_correct,
+                        "truncated": truncated,
                     }
                 )
 
@@ -1149,6 +1212,7 @@ def evaluate(
     question: str | None = None,
     output_dir: str | Path | None = None,
     eval_config_path: str | None = None,
+    model_dtype: str | None = None,
 ):
     config = merge_eval_config(config_path, eval_config_path)
     evaluation_cfg = config.get("evaluation", {})
@@ -1171,6 +1235,12 @@ def evaluate(
     if is_main_process(rank):
         print(f"Device: {device}")
         print(f"World size: {world_size}")
+
+    # ── Override model dtype if requested ──
+    if model_dtype is not None:
+        config.setdefault("model", {})["dtype"] = model_dtype
+        if is_main_process(rank):
+            print(f"Overriding model dtype to: {model_dtype}")
 
     # ── Build system ──
     if is_main_process(rank):
@@ -1261,6 +1331,7 @@ def evaluate(
     # ── Evaluate ──
     correct = 0
     total = 0
+    valid = 0
     results = []
     agent_log_results = []
     sample_durations = []
@@ -1339,9 +1410,10 @@ def evaluate(
                         key: _select_batch_item(value, sample_idx)
                         for key, value in generation.items()
                     }
-                    pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
-                    gold = extract_answer(batch_answers[sample_idx], task_type=task)
-                    is_correct = pred.strip() == gold.strip()
+                    truncated = not sample_generation.get("stopped_early", True)
+                    pred = "" if truncated else extract_answer(batch_generated_text[sample_idx], task_type=task)
+                    gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
+                    is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
                     local_update.append(
                         {
                             "question": batch_questions[sample_idx],
@@ -1350,6 +1422,7 @@ def evaluate(
                             "prediction": pred,
                             "generation": sample_generation,
                             "correct": is_correct,
+                            "truncated": truncated,
                             "agent_log": build_agent_sample_log(
                                 question_id=batch_question_ids[sample_idx],
                                 question=batch_questions[sample_idx],
@@ -1375,6 +1448,8 @@ def evaluate(
                     if shard_update["correct"]:
                         correct += 1
                     total += 1
+                    if not shard_update.get("truncated", False):
+                        valid += 1
                     sample_durations.append(shard_update["sample_seconds"])
                     generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
                     sample_result = {
@@ -1384,6 +1459,7 @@ def evaluate(
                         "prediction": shard_update["prediction"],
                         "generation": shard_update["generation"],
                         "correct": shard_update["correct"],
+                        "truncated": shard_update.get("truncated", False),
                     }
                     if write_agent_logs and shard_update["agent_log"] is not None:
                         agent_log_results.append(shard_update["agent_log"])
@@ -1482,9 +1558,14 @@ def evaluate(
     print(f"{'='*60}")
     print(f"  Task:     {task}")
     print(f"  Split:    {split}")
+    truncated_count = total - valid
+    valid_accuracy = correct / valid * 100 if valid > 0 else 0.0
     print(f"  Samples:  {total}")
+    print(f"  Valid:    {valid} ({valid/total*100:.1f}%)" if total > 0 else f"  Valid:    0")
+    print(f"  Truncated:{truncated_count}")
     print(f"  Correct:  {correct}")
-    print(f"  Accuracy: {accuracy:.2f}%")
+    print(f"  Accuracy: {accuracy:.2f}% (over all samples)")
+    print(f"  Valid Acc:{valid_accuracy:.2f}% (over valid samples only)")
     print(f"  Time:     {t_total:.1f}s ({t_total/total:.1f}s/sample)")
     if sample_durations:
         print(f"  Avg sample: {sum(sample_durations)/len(sample_durations):.2f}s")
@@ -1585,8 +1666,10 @@ def evaluate(
                     max_new_tokens=generation_max_new_tokens,
                 )
 
-                pred = extract_answer(baseline_text, task_type=task)
-                gold = extract_answer(batch["answers"][sample_idx], task_type=task)
+                truncated = not generation.get("stopped_early", True)
+                pred = "" if truncated else extract_answer(baseline_text, task_type=task)
+                gold = batch["answers"][sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch["answers"][sample_idx], task_type=task)
+                is_correct = False if truncated else (math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip())
                 baseline_update.append(
                     {
                         "question_id": batch["question_ids"][sample_idx],
@@ -1594,7 +1677,8 @@ def evaluate(
                         "gold": gold,
                         "prediction": pred,
                         "generation": generation,
-                        "correct": pred.strip() == gold.strip(),
+                        "correct": is_correct,
+                        "truncated": truncated,
                     }
                 )
 
@@ -1765,6 +1849,8 @@ if __name__ == "__main__":
         help="Also run the embedded single-model baseline after ours eval.",
     )
     parser.add_argument("--do-sample", action="store_true")
+    parser.add_argument("--dtype", type=str, default=None, choices=["float32", "bfloat16", "float16"],
+                        help="Override model dtype for eval (default: use training config)")
     parser.add_argument("--no-agent-logs", action="store_true")
     parser.add_argument("--worker", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -1785,4 +1871,5 @@ if __name__ == "__main__":
         question=args.question,
         output_dir=args.output_dir,
         eval_config_path=args.eval_config,
+        model_dtype=args.dtype,
     )

@@ -36,6 +36,7 @@ class HiddenProjection(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """[B, S, D_source] -> [B, S, D_target]"""
+        hidden_states = hidden_states.to(self.proj[0].weight.dtype)
         return self.proj(hidden_states)
 
 
@@ -136,24 +137,29 @@ class PrefixProjector(nn.Module):
             nn.Linear(hidden_dim, num_layers * 2 * self.kv_dim)
         )
 
-    def forward(self, prefix_embeds: torch.Tensor) -> DynamicCache:
+    def forward(self, prefix_embeds: torch.Tensor, target_dtype: torch.dtype | None = None) -> DynamicCache:
         """
         Args:
             prefix_embeds: [B, Lp, hidden_dim] (即 aggregator 输出的 z_j)
+            target_dtype: if set, cast KV cache to this dtype (e.g. model's dtype)
         Returns:
             DynamicCache 兼容的 past_key_values
         """
         B, Lp, _ = prefix_embeds.shape
-        
+
         # [B, Lp, num_layers * 2 * kv_dim]
         kv_out = self.mlp(prefix_embeds)
-        
+
+        # Cast to model dtype if needed (e.g. projector is fp32 but model is bf16)
+        if target_dtype is not None and kv_out.dtype != target_dtype:
+            kv_out = kv_out.to(dtype=target_dtype)
+
         # Reshape: [B, Lp, num_layers, 2, num_kv_heads, head_dim]
         kv_out = kv_out.view(B, Lp, self.num_layers, 2, self.num_kv_heads, self.head_dim)
-        
+
         # 调换维度以便后续分离: -> [num_layers, 2, B, num_kv_heads, Lp, head_dim]
         kv_out = kv_out.permute(2, 3, 0, 4, 1, 5)
-        
+
         try:
             cache = DynamicCache(config=self.cache_config) if self.cache_config is not None else DynamicCache()
         except TypeError:
@@ -163,7 +169,7 @@ class PrefixProjector(nn.Module):
             v = kv_out[layer_idx, 1]  # [B, num_kv_heads, Lp, head_dim]
             # 为了兼容性，使用 contiguous
             cache.update(k.contiguous(), v.contiguous(), layer_idx)
-            
+
         return cache
 
 # 上游 hidden trajectory [B, S, D]

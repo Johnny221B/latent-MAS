@@ -6,14 +6,14 @@ compressor:
 evaluation:
   run_after_train: false
 graph:
-  config: configs/graphs/chain_4agent.json
+  config: configs/graphs/diamond_5agent.json
   init_scale: 2.0
   roles_dir: configs/roles
 model:
   frozen: true
-  name: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+  name: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218
 output:
-  dir: outputs/arch_comparison/sequential_4agent_no_sp
+  dir: outputs/arch_gsm8k_4ep_8b/diamond_5agent
   log_dir: logs
 reasoning:
   compress_last_k: 40
@@ -26,8 +26,8 @@ report:
   use_wandb: true
 training:
   adjacency_lr: 0.01
-  batch_size: 4
-  epochs: 2
+  batch_size: 2
+  epochs: 4
   gradient_accumulation_steps: 16
   input_mode: chat_with_prefix
   lambda_add: 0.1
@@ -37,8 +37,7 @@ training:
   lr: 1.0e-05
   max_seq_len: 8192
   save_interval: 5000
-  source: MATH_metamathQA
-  task: am_deepseek_r1_distilled
+  task: gsm8k
   train_strategy: communication_only
   use_amp: true
   weight_decay: 0.01

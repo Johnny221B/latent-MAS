@@ -1,0 +1,57 @@
+model:
+  name: "Qwen/Qwen3-4B"
+  dtype: bfloat16
+  enable_thinking: true
+  models:
+    primary: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+    secondary: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  agent_models: ["primary", "secondary", "secondary", "secondary", "secondary", "primary"]
+  frozen: true
+
+graph:
+  config: configs/graphs/hierarchical_6agent.json
+  roles_dir: configs/roles
+  init_scale: 2.0
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+  num_layers: 1
+
+training:
+  task: competition_math
+  train_strategy: communication_only
+  input_mode: chat_with_prefix
+  batch_size: 8
+  lr: 0.00001
+  adjacency_lr: 0.05
+  weight_decay: 0.01
+  epochs: 4
+  max_seq_len: 8192
+  lambda_sparse: 0.01
+  lambda_struct: 0.1
+  w_add: 1.0
+  w_drop: 3.0
+  gradient_accumulation_steps: 4
+  log_interval: 1
+  save_interval: 5000
+  use_amp: true
+
+evaluation:
+  run_after_train: false
+
+reasoning:
+  steps_per_agent: 40
+  compress_last_k: 40
+
+output:
+  dir: outputs/arch_comparison/competition_math_hier6_4b_1.7b_4ep_bf16_think
+  log_dir: logs
+
+report:
+  use_wandb: true
+  project: latent-mas
+  key_env: WANDB_API_KEY
+  env_file: .env
+  mode: online

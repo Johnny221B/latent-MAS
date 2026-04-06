@@ -7,7 +7,7 @@ uv run --python .venv/bin/python torchrun \
   --master_port="$MASTER_PORT" \
   --nproc_per_node="${NPROC_PER_NODE:-2}" \
   src/cli/train.py \
-  --config configs/experiments/gsm8k_4agent.yaml \
+  --config configs/experiments/arch/arch_sequential_4agent_4b_gsm8k_4ep_bf16.yaml \
   --max_samples 100000 \
   "$@"
 

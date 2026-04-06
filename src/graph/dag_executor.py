@@ -47,8 +47,8 @@ def _batch_kv_caches(caches: list[DynamicCache | None]) -> DynamicCache | None:
     num_layers = len(valid[0])
     batched = DynamicCache()
     for layer_idx in range(num_layers):
-        keys = torch.cat([c.key_cache[layer_idx] for c in valid], dim=0)
-        values = torch.cat([c.value_cache[layer_idx] for c in valid], dim=0)
+        keys = torch.cat([c[layer_idx][0] for c in valid], dim=0)
+        values = torch.cat([c[layer_idx][1] for c in valid], dim=0)
         batched.update(keys, values, layer_idx)
     return batched
 
@@ -191,7 +191,7 @@ class DAGExecutor:
             upstream_prefix_kv = None
             agent_pp = get_prefix_projector_for(j)
             if agent_pp is not None and upstream_prefix is not None:
-                upstream_prefix_kv = agent_pp(upstream_prefix)
+                upstream_prefix_kv = agent_pp(upstream_prefix, target_dtype=agents[j].base_model.dtype)
             agent_output = agents[j].reason(
                 task_token_ids=task_token_ids,
                 task_attention_mask=task_attention_mask,
@@ -236,7 +236,7 @@ class DAGExecutor:
                         question_text=q,
                         system_prompt=agents[j].system_prompt,
                         role_prompt=agents[j].role_prompt,
-                        enable_thinking=False,
+                        enable_thinking=agents[j].enable_thinking,
                     ))
 
             # Tokenize all prompts together (handles padding automatically)
@@ -256,9 +256,10 @@ class DAGExecutor:
             agent_pp = get_prefix_projector_for(agent_indices[0])
             if agent_pp is not None:
                 kv_list = []
+                model_dtype = agents[agent_indices[0]].base_model.dtype
                 for j, up in zip(agent_indices, upstream_prefixes):
                     if up is not None:
-                        kv = agent_pp(up)
+                        kv = agent_pp(up, target_dtype=model_dtype)
                         kv_list.append(kv)
                     else:
                         kv_list.append(None)
@@ -342,7 +343,7 @@ class DAGExecutor:
                 upstream_prefix_kv = None
                 terminal_pp = get_prefix_projector_for(j)
                 if terminal_pp is not None and upstream_prefix is not None:
-                    upstream_prefix_kv = terminal_pp(upstream_prefix)
+                    upstream_prefix_kv = terminal_pp(upstream_prefix, target_dtype=agents[j].base_model.dtype)
                 if training:
                     # Training: single forward pass, return logits for CE loss
                     terminal_output = agents[j].forward_for_loss(

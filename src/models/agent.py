@@ -47,6 +47,7 @@ class Agent:
         self.base_model = base_model
         self.max_seq_len = max_seq_len
         self.compress_last_k = role_config.get("compress_last_k", 40)
+        self.enable_thinking = role_config.get("enable_thinking", False)
 
         # Pre-tokenize the role prompt (system prompt)
         self._role_tokens = None  # lazily initialized
@@ -151,7 +152,7 @@ class Agent:
                 system_prompt=self.system_prompt,
                 role_prompt=self.role_prompt,
                 upstream_messages=(messages if inference_mode == "chat_with_text" else None),
-                enable_thinking=False,
+                enable_thinking=self.enable_thinking,
             )
             for question_text, messages in zip(question_texts, upstream_texts)
         ]
@@ -290,7 +291,7 @@ class Agent:
                 question_text=q,
                 system_prompt=self.system_prompt,
                 role_prompt=self.role_prompt,
-                enable_thinking=False,
+                enable_thinking=self.enable_thinking,
             )
             for q in question_texts
         ]
