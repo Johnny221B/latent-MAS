@@ -42,8 +42,12 @@ def _format_arc_question(item: dict) -> str:
     return f"{question}\n\nChoices:\n" + "\n".join(choice_lines)
 
 
+_NUM_TO_LETTER = {"1": "A", "2": "B", "3": "C", "4": "D", "5": "E"}
+
+
 def _extract_arc_answer(answer_key: str) -> str:
-    return str(answer_key).strip()
+    key = str(answer_key).strip()
+    return _NUM_TO_LETTER.get(key, key).upper()
 
 
 def build_task_configs() -> dict:

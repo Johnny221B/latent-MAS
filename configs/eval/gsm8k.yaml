@@ -6,5 +6,5 @@ inference_mode: chat_with_prefix
 use_terminal_prefix: true
 do_sample: false
 write_agent_logs: true
-batch_size: 1
-worker: 1
+batch_size: 16
+worker: 2

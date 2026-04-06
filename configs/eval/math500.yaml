@@ -1,6 +1,6 @@
-task: arc_challenge
+task: math500
 split: test
-max_new_tokens: 64
+max_new_tokens: 4096
 max_samples: -1
 inference_mode: chat_with_prefix
 use_terminal_prefix: true

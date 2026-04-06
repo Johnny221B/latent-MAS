@@ -156,7 +156,7 @@ def plot_loss_from_log(log_path, window=20, save_dir=None):
 
 if __name__ == "__main__":
     # 这里改成你的 output.log 路径
-    log_path = "/home/chengzhi.ucsb/code/toby/latent-MAS/outputs/gsm8k_qwen3-4b_20260402_172227/wandb/latest-run/files/output.log"
+    log_path = "/home/chengzhi.ucsb/code/toby/latent-MAS/outputs/arch_gsm8k_4ep/sequential_4agent_bf16_20260404_193909/wandb/latest-run/files/output.log"
 
     # window 可以改，比如 10 / 20 / 50
     df, epoch_df = plot_loss_from_log(log_path, window=20)

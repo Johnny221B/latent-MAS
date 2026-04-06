@@ -13,9 +13,8 @@ model:
   dtype: bfloat16
   frozen: true
   name: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
-  enable_thinking: true
 output:
-  dir: outputs/arch_gsm8k_4ep/sequential_4agent_bf16
+  dir: outputs/arch_math_4ep/sequential_4agent_bf16
   log_dir: logs
 reasoning:
   compress_last_k: 40
@@ -29,7 +28,7 @@ report:
 training:
   adjacency_lr: 0.05
   batch_size: 4
-  epochs: 2
+  epochs: 4
   gradient_accumulation_steps: 4
   input_mode: chat_with_prefix
   lambda_struct: 0.1
@@ -40,7 +39,7 @@ training:
   lr: 1.0e-05
   max_seq_len: 8192
   save_interval: 5000
-  task: gsm8k
+  task: math
   train_strategy: communication_only
   use_amp: true
   weight_decay: 0.01

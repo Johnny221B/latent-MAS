@@ -28,7 +28,7 @@ torchrun --master_port=29761 --nproc_per_node=1 \
   --config ${CKPT}/config.yaml \
   --checkpoint ${CKPT}/final_model.pt \
   --eval-config configs/eval/math.yaml \
-  --max-new-tokens 4096 \
+  --max-new-tokens 8192 \
   --output-dir ${CKPT}/math_eval \
   --max_samples -1 --batch-size 4
 

@@ -236,7 +236,7 @@ class DAGExecutor:
                         question_text=q,
                         system_prompt=agents[j].system_prompt,
                         role_prompt=agents[j].role_prompt,
-                        enable_thinking=False,
+                        enable_thinking=agents[j].enable_thinking,
                     ))
 
             # Tokenize all prompts together (handles padding automatically)

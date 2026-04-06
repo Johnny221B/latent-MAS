@@ -36,6 +36,7 @@ class HiddenProjection(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """[B, S, D_source] -> [B, S, D_target]"""
+        hidden_states = hidden_states.to(self.proj[0].weight.dtype)
         return self.proj(hidden_states)
 
 

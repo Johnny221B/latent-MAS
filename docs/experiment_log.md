@@ -14,24 +14,46 @@ All experiments evaluated on GSM8K test set (1319 samples unless noted).
 
 | Architecture | Agents | GSM8K | Correct | Output Dir |
 |-------------|--------|-------|---------|-----------|
-| **Sequential (chain)** | 4 | **91.28%** | 1204 | `arch_comparison/sequential_4agent_no_sp_*` |
+| **Two-path** | 4 | **91.28%** | 1204 | `arch_gsm8k_4ep/two_path_4agent_*` |
+| Hierarchical-6 | 6 | 91.13% | 1202 | `arch_gsm8k_4ep/hierarchical_6agent_*` |
 | Diamond | 5 | 91.21% | 1203 | `arch_gsm8k_4ep/diamond_5agent_*` |
+| Sequential (chain) | 4 | 91.05% | 1201 | `arch_gsm8k_4ep/sequential_4agent_*` |
 | Dense (full DAG) | 4 | 90.75% | 1197 | `arch_gsm8k_4ep/dense_4agent_*` |
 | Hierarchical-4 | 4 | 90.67% | 1196 | `arch_gsm8k_4ep/hierarchical_4agent_*` |
-| Two-path | 4 | pending | — | — |
-| Hierarchical-6 | 6 | pending | — | — |
 
-Config: `batch_size=4, grad_accum=16, lr=1e-5, adj_lr=0.01, steps=40, queries=16, comp_layers=1`
-Data: AM-R1 distilled (sequential_no_sp) / GSM8K (others)
+Config: `batch_size=4, grad_accum=2, lr=1e-5, adj_lr=0.05, steps=40, queries=16, comp_layers=1, AMP=true`
+Data: GSM8K train
 
-## 2. Architecture Comparison — 2 epochs (earlier run)
+### Sequential bf16 variants (batch_size=16)
+
+| Variant | GSM8K | Output Dir |
+|---------|-------|-----------|
+| bf16_20260404_193909 | 91.21% (1203) | `arch_gsm8k_4ep/sequential_4agent_bf16_20260404_193909` |
+| bf16_20260404_230425 | 91.05% (1201) | `arch_gsm8k_4ep/sequential_4agent_bf16_20260404_230425` |
+| bf16_20260404_131726 | 90.60% (1195) | `arch_gsm8k_4ep/sequential_4agent_bf16_20260404_131726` |
+| bf16_20260404_170948 | 90.45% (1193) | `arch_gsm8k_4ep/sequential_4agent_bf16_20260404_170948` |
+
+## 2. Multi-Benchmark Evaluation — Sequential 4-agent, AM-R1 data, 2 epochs, bf16
+
+Model: Qwen3-4B, `batch_size=4, grad_accum=2, lr=1e-5, AMP=true`
+Data: AM DeepSeek R1 distilled (source: am-0309)
+
+| Benchmark | Score | Samples | Output Dir |
+|-----------|-------|---------|-----------|
+| **GSM8K** | **91.05%** | 1319 | `arch_comparison/am_sequential_4agent_2ep_bf16_*/gsm8k_eval` |
+| **ARC-Easy** | **95.66%** | 2376 | `arch_comparison/am_sequential_4agent_2ep_bf16_*/arc_easy` |
+| **ARC-Challenge** | **90.61%** | 1172 | `arch_comparison/am_sequential_4agent_2ep_bf16_*/arc_challenge` |
+| **MATH-500** | **53.91%** | 500 | `arch_comparison/am_sequential_4agent_2ep_bf16_*/math500` |
+| **HumanEval** | **45.45%** (pass@1) | 66 | `arch_comparison/am_sequential_4agent_2ep_bf16_*/humaneval` |
+
+## 3. Architecture Comparison — 2 epochs (earlier run)
 
 | Architecture | Agents | Data | GSM8K | Output Dir |
 |-------------|--------|------|-------|-----------|
 | Sequential (chain) | 4 | AM-R1 | 87.26% (1151) | `arch_comparison/sequential_4agent_*` |
 | Dense (full DAG) | 4 | AM-R1 | 87.19% (1150) | `arch_comparison/dense_4agent_*` |
 
-## 3. Hierarchical 6-agent (方案C) — Model Size Comparison
+## 4. Hierarchical 6-agent (方案C) — Model Size Comparison
 
 Graph: `planner → (analyst, critic, verifier) → refiner → solver`
 Data: AM-R1 distilled, AMP
@@ -44,7 +66,7 @@ Data: AM-R1 distilled, AMP
 | Qwen3-1.7B | 2 | 8 | fp32 + bf16 fwd | fp32 + bf16 fwd | 77.56% (1023) | `hier6/am_deepseek_r1_1.7b_amp_*` |
 | 4B+1.7B 异构 | 2 | 4 | fp32 + bf16 fwd | fp32 + bf16 fwd | eval pending | `hier6/am_deepseek_r1_4b_1.7b_amp_*` |
 
-## 4. Graph v2 — Sequential 4-agent Chain
+## 5. Graph v2 — Sequential 4-agent Chain
 
 Graph: `planner → critic → refiner → solver`
 
@@ -56,7 +78,7 @@ Graph: `planner → critic → refiner → solver`
 | Qwen3-4B | GSM8K | fp32 | fp32 | 86.43% (1140) | `graph_v2/gsm8k_qwen3-4b_*` |
 | Qwen3-4B | GSM8K | fp32 | fp32 | 83.78% (1105) | text-only eval |
 
-## 5. 1.7B Hyperparameter Sweep (sequential 4-agent, GSM8K, 2 epochs)
+## 6. 1.7B Hyperparameter Sweep (sequential 4-agent, GSM8K, 2 epochs)
 
 All: Qwen3-1.7B, fp32, no AMP
 
@@ -71,7 +93,7 @@ All: Qwen3-1.7B, fp32, no AMP
 | s40 | q32 | cl1 | 74.15% (978) | `graph_v2/1.7b-q32-s40-cl1_*` |
 | s60 | q32 | cl2 | 74.07% (977) | `graph_v2/1.7b-q32-s60-cl2_*` |
 
-## 6. 4B Hyperparameter Sweep (sequential 5-agent, GSM8K)
+## 7. 4B Hyperparameter Sweep (sequential 5-agent, GSM8K)
 
 All: Qwen3-4B, fp32, no AMP
 
@@ -82,7 +104,7 @@ All: Qwen3-4B, fp32, no AMP
 | ep5 | s40 | q16 | cl2 | 85.90% (1133) | `gsm8k-4b-ep5-s40-q16-cl2_*` |
 | ep5 | s40 | q32 | cl1 | 85.60% (1129) | `gsm8k-4b-ep5-s40-q32-cl1_*` |
 
-## 7. Earlier Experiments (default 5-agent/3-agent, GSM8K)
+## 8. Earlier Experiments (default 5-agent/3-agent, GSM8K)
 
 | Date | Model | Graph | Model Precision | Latent Precision | GSM8K | Output Dir |
 |------|-------|-------|----------------|-----------------|-------|-----------|
@@ -119,9 +141,7 @@ F: Hierarchical-6    planner → (analyst, critic, verifier) → refiner → sol
 
 | Job ID | Task | Status |
 |--------|------|--------|
-| 28736665-28736670 | arch comparison 4B × 6 archs (GSM8K, 4ep) | running |
-| 28736665-28736670 (8B) | arch comparison 8B × 6 archs (GSM8K, 4ep) | pending submit |
-| 28734985 | eval 4B+1.7B heterogeneous | submitted |
+| 28812957 | Sequential 4-agent, AM-R1, 2ep, bf16, think=true + 6 evals | submitted |
 
 ---
 
@@ -135,3 +155,12 @@ _Auto-updated by `scripts/monitor_experiments.sh`_
 | 04-04 | Qwen3-4B | two_path_4agent | True | ? | 4 | **100.00%** (8/8) | `two_path_4agent_20260404_102104` |
 | 04-04 | Qwen3-4B | hierarchical_6agent | True | ? | 4 | **93.75%** (15/16) | `hierarchical_6agent_20260404_091712` |
 | 04-04 | Qwen3-4B | chain_4agent | True | ? | 16 | **92.50%** (37/40) | `sequential_4agent_bf16_20260404_131726` |
+| 04-04 | Qwen3-4B | chain_4agent | True | ? | 16 | **94.44%** (34/36) | `sequential_4agent_bf16_20260404_170948` |
+| 04-04 | Qwen3-4B | chain_4agent | True | ? | 16 | **100.00%** (4/4) | `sequential_4agent_bf16_20260404_193909` |
+| 04-04 | Qwen3-4B | chain_4agent | True | ? | 16 | **93.18%** (41/44) | `sequential_4agent_bf16_20260404_230425` |
+| 04-05 | Qwen3-1.7B+Qwen3-4B | hierarchical_6agent | True | ? | 16 | **92.71%** (356/384) | `hier6_4b_1.7b_bf16_20260404_152531` |
+| 04-05 | Qwen3-4B | chain_4agent | True | ? | 4 | **93.12%** (298/320) | `am_sequential_4agent_2ep_bf16_20260405_035543` |
+| 04-05 | Qwen3-4B | chain_4agent | True | ? | 4 | **96.88%** (62/64) | `am_sequential_4agent_2ep_bf16_think_20260405_124911` |
+| 04-05 | Qwen3-4B | chain_4agent | True | ? | 8 | **95.31%** (61/64) | `competition_math_sequential_4agent_1ep_bf16_think_20260405_134422` |
+| 04-06 | Qwen3-4B | chain_4agent | True | ? | 4 | **50.00%** (6/12) | `sequential_4agent_bf16_20260405_213221` |
+| 04-06 | Qwen3-1.7B+Qwen3-4B | hierarchical_6agent | True | ? | 8 | **95.31%** (61/64) | `competition_math_hier6_4b_1.7b_4ep_bf16_think_20260406_043621` |

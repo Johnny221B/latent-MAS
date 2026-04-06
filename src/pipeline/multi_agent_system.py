@@ -133,6 +133,7 @@ class MultiAgentSystem(nn.Module):
                 role_config["reasoning_steps"] = config["reasoning"]["steps_per_agent"]
             if "compress_last_k" in config["reasoning"]:
                 role_config["compress_last_k"] = config["reasoning"]["compress_last_k"]
+            role_config["enable_thinking"] = config.get("model", {}).get("enable_thinking", False)
             global_sp = config.get("training", {}).get("global_system_prompt", None)
             if global_sp:
                 sp_path = Path(global_sp)
@@ -237,9 +238,10 @@ class MultiAgentSystem(nn.Module):
         self.task_loss_fn = TaskLoss()  # "ce" or "reward"
         training_cfg = config.get("training", {})
         self.graph_loss_fn = GraphLoss(
-            lambda_add=training_cfg.get("lambda_add", 0.1),
-            lambda_drop=training_cfg.get("lambda_drop", 0.5),
-            lambda_sparse=training_cfg.get("lambda_sparse", 0.1),
+            lambda_struct=training_cfg.get("lambda_struct", 0.1),
+            lambda_sparse=training_cfg.get("lambda_sparse", 0.01),
+            w_add=training_cfg.get("w_add", 1.0),
+            w_drop=training_cfg.get("w_drop", 5.0),
         )
 
     def forward(
@@ -309,8 +311,7 @@ class MultiAgentSystem(nn.Module):
                 "task_loss": task_loss,
                 "final_logits": final_logits,
                 "graph_loss": graph_loss_dict["loss"],
-                "graph_loss_add": graph_loss_dict["loss_add"],
-                "graph_loss_drop": graph_loss_dict["loss_drop"],
+                "graph_loss_bce": graph_loss_dict["loss_bce"],
                 "graph_loss_sparse": graph_loss_dict["loss_sparse"],
             })
         else:

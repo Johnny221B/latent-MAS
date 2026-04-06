@@ -869,6 +869,16 @@ def train(config_path: str, max_samples: int | None = None):
 
             t3 = time.time()
 
+            # Release references to intermediate tensors (logits, hidden states)
+            # to allow CUDA to reclaim memory before the next micro-batch.
+            loss_val = output["loss"].item()
+            task_loss_val = output["task_loss"].item()
+            graph_loss_val = output["graph_loss"].item()
+            graph_loss_bce_val = output["graph_loss_bce"].item()
+            graph_loss_sparse_val = output["graph_loss_sparse"].item()
+            del loss, output
+            torch.cuda.empty_cache()
+
             if (batch_idx + 1) % grad_accum_steps == 0:
                 # ── Sync adjacency gradients across GPUs (manual allreduce) ──
                 # Must be inside the accumulation gate so it runs once per optimizer step,
@@ -900,12 +910,11 @@ def train(config_path: str, max_samples: int | None = None):
                         wandb_run,
                         {
                             "train/global_step": global_step,
-                            "train/loss": output["loss"].item(),
-                            "train/task_loss": output["task_loss"].item(),
-                            "train/graph_loss": output["graph_loss"].item(),
-                            "train/graph_loss_add": output["graph_loss_add"].item(),
-                            "train/graph_loss_drop": output["graph_loss_drop"].item(),
-                            "train/graph_loss_sparse": output["graph_loss_sparse"].item(),
+                            "train/loss": loss_val,
+                            "train/task_loss": task_loss_val,
+                            "train/graph_loss": graph_loss_val,
+                            "train/graph_loss_bce": graph_loss_bce_val,
+                            "train/graph_loss_sparse": graph_loss_sparse_val,
                             "train/comp_grad": comp_grad,
                             "train/proj_grad": proj_grad,
                             "train/adj_grad": adj_grad,
@@ -976,7 +985,7 @@ def train(config_path: str, max_samples: int | None = None):
                     )
                 optimizer.zero_grad()
 
-            epoch_loss += output["loss"].item()
+            epoch_loss += loss_val
             epoch_batches += 1
 
             # ── Logging (main process only) ──
@@ -1001,9 +1010,9 @@ def train(config_path: str, max_samples: int | None = None):
 
                 print(
                     f"  E{epoch+1} B{batch_idx+1}/{len(dataloader)} | "
-                    f"Loss:{output['loss'].item():.4f} "
-                    f"Task:{output['task_loss'].item():.4f} "
-                    f"Graph:{output['graph_loss'].item():.4f} | "
+                    f"Loss:{loss_val:.4f} "
+                    f"Task:{task_loss_val:.4f} "
+                    f"Graph:{graph_loss_val:.4f} | "
                     f"C∇:{display_comp_grad:.6f} P∇:{display_proj_grad:.6f} A∇:{display_adj_grad:.6f} | "
                     f"tok:{t1-t0:.1f}s fwd:{t2-t1:.1f}s bwd:{t3-t2:.1f}s | "
                     f"mem:{display_mem:.1f}GB | "
@@ -1017,9 +1026,9 @@ def train(config_path: str, max_samples: int | None = None):
                     "epoch": epoch + 1,
                     "batch": batch_idx + 1,
                     "global_step": global_step,
-                    "loss": output["loss"].item(),
-                    "task_loss": output["task_loss"].item(),
-                    "graph_loss": output["graph_loss"].item(),
+                    "loss": loss_val,
+                    "task_loss": task_loss_val,
+                    "graph_loss": graph_loss_val,
                     "comp_grad": comp_grad,
                     "proj_grad": proj_grad,
                     "adj_grad": adj_grad,
