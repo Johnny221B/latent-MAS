@@ -1135,7 +1135,7 @@ def evaluate_loaded_system(
 
 def evaluate(
     config_path: str,
-    checkpoint_path: str,
+    checkpoint_path: str | None = None,
     max_samples: int | None = None,
     split: str | None = None,
     max_new_tokens: int | None = None,
@@ -1178,23 +1178,27 @@ def evaluate(
     system = MultiAgentSystem(config)
 
     # ── Load checkpoint ──
-    if is_main_process(rank):
-        print(f"Loading checkpoint: {checkpoint_path}")
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    if checkpoint_path is not None:
+        if is_main_process(rank):
+            print(f"Loading checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
 
-    base_model_state = ckpt.get("base_model_state")
-    if base_model_state is not None:
-        system.base_model.model.load_state_dict(base_model_state)
+        base_model_state = ckpt.get("base_model_state")
+        if base_model_state is not None:
+            system.base_model.model.load_state_dict(base_model_state)
 
-    # Handle DDP-wrapped state dict (keys may have "module." prefix)
-    comp_state = ckpt["compressor_state"]
-    cleaned_state = {}
-    for k, v in comp_state.items():
-        new_key = k.replace("module.", "") if k.startswith("module.") else k
-        cleaned_state[new_key] = v
-    system.compressor.load_state_dict(cleaned_state)
+        # Handle DDP-wrapped state dict (keys may have "module." prefix)
+        comp_state = ckpt["compressor_state"]
+        cleaned_state = {}
+        for k, v in comp_state.items():
+            new_key = k.replace("module.", "") if k.startswith("module.") else k
+            cleaned_state[new_key] = v
+        system.compressor.load_state_dict(cleaned_state)
 
-    system.adjacency.load_state_dict(ckpt["adjacency_state"])
+        system.adjacency.load_state_dict(ckpt["adjacency_state"])
+    else:
+        if is_main_process(rank):
+            print("No checkpoint provided — using random-initialized compressor/adjacency.")
     system.to(device)
     system.eval()
 
@@ -1737,7 +1741,7 @@ def evaluate(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--eval-config", type=str, default=None)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--split", type=str, default=None, choices=["train", "test"])
