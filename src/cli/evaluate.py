@@ -163,6 +163,7 @@ def write_eval_snapshot(
     time_seconds: float,
     *,
     valid: int | None = None,
+    valid_correct: int | None = None,
     avg_sample_seconds: float | None = None,
     avg_generated_tokens: float | None = None,
     avg_tokens_per_second: float | None = None,
@@ -175,8 +176,10 @@ def write_eval_snapshot(
     accuracy = correct / total * 100 if total > 0 else 0.0
     if valid is None:
         valid = total
+    if valid_correct is None:
+        valid_correct = correct
     truncated = total - valid
-    valid_accuracy = correct / valid * 100 if valid > 0 else 0.0
+    valid_accuracy = valid_correct / valid * 100 if valid > 0 else 0.0
     payload = {
         "method": method,
         "task": task,
@@ -778,6 +781,7 @@ def evaluate_loaded_system(
     correct = 0
     total = 0
     valid = 0
+    valid_correct = 0
     results = []
     agent_log_results = []
     sample_durations = []
@@ -847,7 +851,8 @@ def evaluate_loaded_system(
                         key: _select_batch_item(value, sample_idx)
                         for key, value in generation.items()
                     }
-                    truncated = not sample_generation.get("stopped_early", True)
+                    generated_count = sample_generation.get("generated_token_count", 0)
+                    truncated = generated_count >= generation_max_new_tokens
                     pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
                     gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
                     is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
@@ -887,6 +892,8 @@ def evaluate_loaded_system(
                     total += 1
                     if not shard_update.get("truncated", False):
                         valid += 1
+                        if shard_update["correct"]:
+                            valid_correct += 1
                     sample_durations.append(shard_update["sample_seconds"])
                     generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
                     sample_result = {
@@ -930,6 +937,7 @@ def evaluate_loaded_system(
                 correct=correct,
                 total=total,
                 valid=valid,
+                valid_correct=valid_correct,
                 time_seconds=time.time() - t_start,
                 avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
                 avg_generated_tokens=(
@@ -971,7 +979,7 @@ def evaluate_loaded_system(
     print(f"  Task:     {task}")
     print(f"  Split:    {split}")
     truncated_count = total - valid
-    valid_accuracy = correct / valid * 100 if valid > 0 else 0.0
+    valid_accuracy = valid_correct / valid * 100 if valid > 0 else 0.0
     print(f"  Samples:  {total}")
     print(f"  Valid:    {valid} ({valid/total*100:.1f}%)" if total > 0 else f"  Valid:    0")
     print(f"  Truncated:{truncated_count}")
@@ -1060,7 +1068,8 @@ def evaluate_loaded_system(
                     eos_token_id=system.base_model.tokenizer.eos_token_id,
                     max_new_tokens=generation_max_new_tokens,
                 )
-                truncated = not generation.get("stopped_early", True)
+                generated_count = generation.get("generated_token_count", 0)
+                truncated = generated_count >= generation_max_new_tokens
                 pred = extract_answer(baseline_text, task_type=task)
                 gold = batch["answers"][sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch["answers"][sample_idx], task_type=task)
                 is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
@@ -1341,6 +1350,7 @@ def evaluate(
     correct = 0
     total = 0
     valid = 0
+    valid_correct = 0
     results = []
     agent_log_results = []
     sample_durations = []
@@ -1419,7 +1429,8 @@ def evaluate(
                         key: _select_batch_item(value, sample_idx)
                         for key, value in generation.items()
                     }
-                    truncated = not sample_generation.get("stopped_early", True)
+                    generated_count = sample_generation.get("generated_token_count", 0)
+                    truncated = generated_count >= generation_max_new_tokens
                     pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
                     gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
                     is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
@@ -1459,6 +1470,8 @@ def evaluate(
                     total += 1
                     if not shard_update.get("truncated", False):
                         valid += 1
+                        if shard_update["correct"]:
+                            valid_correct += 1
                     sample_durations.append(shard_update["sample_seconds"])
                     generated_token_counts.append(shard_update["generation"].get("generated_token_count", 0))
                     sample_result = {
@@ -1488,6 +1501,7 @@ def evaluate(
                 correct=correct,
                 total=total,
                 valid=valid,
+                valid_correct=valid_correct,
                 time_seconds=time.time() - t_start,
                 avg_sample_seconds=(sum(sample_durations) / len(sample_durations)) if sample_durations else None,
                 avg_generated_tokens=(sum(generated_token_counts) / len(generated_token_counts)) if generated_token_counts else None,
@@ -1569,7 +1583,7 @@ def evaluate(
     print(f"  Task:     {task}")
     print(f"  Split:    {split}")
     truncated_count = total - valid
-    valid_accuracy = correct / valid * 100 if valid > 0 else 0.0
+    valid_accuracy = valid_correct / valid * 100 if valid > 0 else 0.0
     print(f"  Samples:  {total}")
     print(f"  Valid:    {valid} ({valid/total*100:.1f}%)" if total > 0 else f"  Valid:    0")
     print(f"  Truncated:{truncated_count}")
@@ -1676,7 +1690,8 @@ def evaluate(
                     max_new_tokens=generation_max_new_tokens,
                 )
 
-                truncated = not generation.get("stopped_early", True)
+                generated_count = generation.get("generated_token_count", 0)
+                truncated = generated_count >= generation_max_new_tokens
                 pred = extract_answer(baseline_text, task_type=task)
                 gold = batch["answers"][sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch["answers"][sample_idx], task_type=task)
                 is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()

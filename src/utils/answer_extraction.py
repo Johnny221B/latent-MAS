@@ -233,17 +233,132 @@ def _extract_humaneval(text: str) -> str:
     return text.strip()
 
 
+_UNICODE_TO_LATEX = {
+    "∞": "\\infty",
+    "π": "\\pi",
+    "·": "\\cdot",
+    "×": "\\times",
+    "≤": "\\leq",
+    "≥": "\\geq",
+    "≠": "\\neq",
+    "±": "\\pm",
+    "∓": "\\mp",
+    "√": "\\sqrt",
+    "∈": "\\in",
+    "∪": "\\cup",
+    "∩": "\\cap",
+    "⊂": "\\subset",
+    "⊃": "\\supset",
+    "∅": "\\emptyset",
+    "α": "\\alpha",
+    "β": "\\beta",
+    "γ": "\\gamma",
+    "δ": "\\delta",
+    "θ": "\\theta",
+    "λ": "\\lambda",
+    "μ": "\\mu",
+    "σ": "\\sigma",
+    "ω": "\\omega",
+    "°": "^\\circ",
+}
+
+
 def _normalize_math_str(s: str) -> str:
     """Normalize a math answer string for comparison."""
-    s = s.strip().strip("$").strip(".")
-    # \dfrac -> \frac, \tfrac -> \frac
+    s = s.strip().strip("$")
+    # Only strip trailing dot (not leading — ".5" must stay)
+    s = s.rstrip(".")
+    # Unicode → LaTeX
+    for uchar, latex in _UNICODE_TO_LATEX.items():
+        s = s.replace(uchar, latex)
+    # Remove LaTeX dollar sign \$, spacing commands \! \, \; \:, and \%
+    s = s.replace("\\$", "")
+    s = s.replace("\\%", "%")
+    s = re.sub(r"\\[!,;:]", "", s)
+    # \dfrac/\tfrac → \frac
     s = re.sub(r"\\[dt]frac", r"\\frac", s)
-    # Remove \text{}, \mathrm{}, \mathit{} wrappers
+    # \frac shorthand normalization (all combos of missing braces):
+    # \frac56 → \frac{5}{6}, \frac5{6} → \frac{5}{6}, \frac{5}6 → \frac{5}{6}
+    s = re.sub(r"\\frac\s*(\w)\s*(\w)", r"\\frac{\1}{\2}", s)          # \frac56
+    s = re.sub(r"\\frac\s*(\w)\s*(\{[^}]+\})", r"\\frac{\1}\2", s)    # \frac5{6}
+    s = re.sub(r"\\frac\s*(\{[^}]+\})\s*(\w)", r"\\frac\1{\2}", s)    # \frac{5}6
+    # \sqrt7 or \sqrt X (single-char without braces) → \sqrt{X}
+    s = re.sub(r"\\sqrt\s*([^{\s])", r"\\sqrt{\1}", s)
+    # Remove \text{}, \mathrm{}, \mathit{}, \textbf{} wrappers
     s = re.sub(r"\\(?:text|mathrm|mathit|textbf)\s*\{([^}]*)\}", r"\1", s)
+    # Strip trailing unit/text words (2+ chars, e.g. "575 students", "2500 square feet")
+    # Does NOT strip single letters (i, r, x — may be math variables)
+    s = re.sub(r"\s+[a-zA-Z]{2,}[\sa-zA-Z.]*$", "", s)
     # Remove \left \right
     s = re.sub(r"\\(?:left|right)\s*", "", s)
+    # Remove "x \in" prefix (e.g. "x \in [-2,7]" → "[-2,7]")
+    s = re.sub(r"^[a-zA-Z]\s*\\in\s*", "", s)
     # Remove spaces
     s = s.replace(" ", "")
+    # Strip variable/function assignment prefix: "x=-7" → "-7", "k(x)=-1" → "-1"
+    s = re.sub(r"^[a-zA-Z]+\([a-zA-Z]\)\s*=\s*", "", s)
+    s = re.sub(r"^[a-zA-Z]\s*=\s*", "", s)
+    return s
+
+
+def _latex_frac_to_float(s: str) -> float | None:
+    r"""Try to convert \frac{a}{b} to a float."""
+    m = re.fullmatch(r"\\frac\{([^}]+)\}\{([^}]+)\}", s)
+    if m:
+        try:
+            return float(m.group(1)) / float(m.group(2))
+        except (ValueError, ZeroDivisionError):
+            return None
+    # Negative fraction: -\frac{a}{b}
+    m = re.fullmatch(r"-\\frac\{([^}]+)\}\{([^}]+)\}", s)
+    if m:
+        try:
+            return -float(m.group(1)) / float(m.group(2))
+        except (ValueError, ZeroDivisionError):
+            return None
+    return None
+
+
+def _latex_to_sympy_str(s: str) -> str:
+    """Convert a LaTeX math expression to a string sympy can parse."""
+    s = _normalize_math_str(s)
+    # \frac{a}{b} → ((a)/(b))
+    while "\\frac{" in s:
+        idx = s.index("\\frac{")
+        # Find the two brace groups
+        start1 = s.index("{", idx)
+        depth, i = 0, start1
+        for i in range(start1, len(s)):
+            if s[i] == "{": depth += 1
+            elif s[i] == "}": depth -= 1
+            if depth == 0: break
+        end1 = i
+        num = s[start1 + 1:end1]
+        start2 = s.index("{", end1 + 1) if end1 + 1 < len(s) and "{" in s[end1 + 1:] else -1
+        if start2 == -1:
+            break
+        depth, i = 0, start2
+        for i in range(start2, len(s)):
+            if s[i] == "{": depth += 1
+            elif s[i] == "}": depth -= 1
+            if depth == 0: break
+        end2 = i
+        den = s[start2 + 1:end2]
+        s = s[:idx] + f"(({num})/({den}))" + s[end2 + 1:]
+    # \sqrt{a} → sqrt(a)
+    s = re.sub(r"\\sqrt\{([^}]+)\}", r"sqrt(\1)", s)
+    # Remove remaining backslashes
+    s = s.replace("\\", "")
+    # ^ → **
+    s = s.replace("^", "**")
+    # {, } → (, )
+    s = s.replace("{", "(").replace("}", ")")
+    # Insert implicit multiplication (preserve function names like sqrt, log, etc.)
+    # digit followed by letter or '(': 2x → 2*x, 2( → 2*(
+    s = re.sub(r"(\d)([a-zA-Z(])", r"\1*\2", s)
+    # ')' followed by '(', digit, or letter: )( → )*(, )2 → )*2, )x → )*x
+    s = re.sub(r"(\))([a-zA-Z0-9(])", r"\1*\2", s)
+    # DO NOT insert * between letters — that would break sqrt, log, sin, etc.
     return s
 
 
@@ -251,30 +366,86 @@ def _try_parse_sympy(expr_str: str):
     """Try to parse a math expression string with sympy. Returns None on failure."""
     try:
         from sympy.parsing.latex import parse_latex
-        return parse_latex(expr_str)
+        result = parse_latex(expr_str)
+        if result is not None:
+            return result
     except Exception:
         pass
     try:
         from sympy import sympify
-        cleaned = expr_str.replace("\\", "")
+        cleaned = _latex_to_sympy_str(expr_str)
         return sympify(cleaned, rational=True)
     except Exception:
         return None
 
 
 def _is_numeric_equal(a: str, b: str) -> bool:
-    """Check if two strings represent the same number (e.g. '.5' vs '0.5' vs '1/2')."""
-    try:
-        from fractions import Fraction
-        fa = Fraction(a.replace(",", ""))
-        fb = Fraction(b.replace(",", ""))
-        return fa == fb
-    except (ValueError, ZeroDivisionError):
-        pass
-    try:
-        return abs(float(a.replace(",", "")) - float(b.replace(",", ""))) < 1e-9
-    except (ValueError, OverflowError):
+    """Check if two strings represent the same number.
+
+    Handles: .5 vs 0.5, 1/2 vs 0.5, \\frac{15}{2} vs 7.5, etc.
+    """
+    def _to_float(s: str) -> float | None:
+        # Try \frac{a}{b}
+        v = _latex_frac_to_float(s)
+        if v is not None:
+            return v
+        # Try plain fraction a/b
+        if "/" in s and "\\" not in s:
+            parts = s.split("/")
+            if len(parts) == 2:
+                try:
+                    return float(parts[0]) / float(parts[1])
+                except (ValueError, ZeroDivisionError):
+                    pass
+        # Try plain float
+        try:
+            return float(s.replace(",", ""))
+        except ValueError:
+            return None
+
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) < 1e-9
+    return False
+
+
+def _parse_interval(s: str) -> tuple | None:
+    """Try to parse an interval like (1,4.5) or [-2,7] or (-inf, inf).
+
+    Returns (left_bracket, left_val, right_val, right_bracket) or None.
+    """
+    s = _normalize_math_str(s)
+    m = re.fullmatch(r"([\[\(])([^,]+),([^,]+)([\]\)])", s)
+    if not m:
+        return None
+    lb, left, right, rb = m.group(1), m.group(2), m.group(3), m.group(4)
+    return (lb, left.strip(), right.strip(), rb)
+
+
+def _intervals_equal(a: str, b: str) -> bool:
+    """Check if two interval expressions are equivalent."""
+    ia, ib = _parse_interval(a), _parse_interval(b)
+    if ia is None or ib is None:
         return False
+    # Brackets must match
+    if ia[0] != ib[0] or ia[3] != ib[3]:
+        return False
+    # Compare endpoints (may be numeric or symbolic)
+    for va, vb in [(ia[1], ib[1]), (ia[2], ib[2])]:
+        if _normalize_math_str(va) == _normalize_math_str(vb):
+            continue
+        if _is_numeric_equal(va, vb):
+            continue
+        sa, sb = _try_parse_sympy(va), _try_parse_sympy(vb)
+        if sa is not None and sb is not None:
+            try:
+                from sympy import simplify
+                if simplify(sa - sb) == 0:
+                    continue
+            except Exception:
+                pass
+        return False
+    return True
 
 
 def math_is_equivalent(pred: str, gold: str) -> bool:
@@ -282,28 +453,51 @@ def math_is_equivalent(pred: str, gold: str) -> bool:
 
     Tries in order:
     1. Normalized string equality
-    2. Numeric equality (handles .5 vs 1/2 vs 0.5)
-    3. Sympy symbolic equality (handles \\frac{x+2}{7} vs (x+2)/7)
+    2. Numeric equality (handles .5 vs 1/2 vs \\frac{15}{2} vs 7.5)
+    3. Interval comparison (handles (1, \\frac{9}{2}) vs (1, 4.5))
+    4. Sympy symbolic equality (handles \\sqrt{x} vs x^{1/2})
     """
     # 1. Normalized string match
-    np, ng = _normalize_math_str(pred), _normalize_math_str(gold)
-    if np == ng:
+    np_, ng = _normalize_math_str(pred), _normalize_math_str(gold)
+    if np_ == ng:
         return True
 
     # 2. Numeric equality
-    if _is_numeric_equal(np, ng):
+    if _is_numeric_equal(np_, ng):
         return True
 
-    # 3. Sympy symbolic equality
+    # 3. Interval comparison
+    if _intervals_equal(pred, gold):
+        return True
+
+    # 3b. Union of intervals: split on \cup and compare pairwise
+    cup_pat = r"\\cup"
+    pred_parts = re.split(cup_pat, np_)
+    gold_parts = re.split(cup_pat, ng)
+    if len(pred_parts) == len(gold_parts) and len(pred_parts) > 1:
+        if all(_intervals_equal(p.strip(), g.strip()) for p, g in zip(pred_parts, gold_parts)):
+            return True
+
+    # 4. math-verify (robust symbolic comparison with pre-normalized input)
+    # Skip for very long strings to avoid parse timeouts on degenerate outputs
+    if len(np_) <= 500 and len(ng) <= 500:
+        try:
+            from math_verify import parse as mv_parse, verify as mv_verify
+            g = mv_parse(f"${np_}$")
+            p = mv_parse(f"${ng}$")
+            if mv_verify(g, p):
+                return True
+        except Exception:
+            pass
+
+    # 5. Sympy symbolic equality (fallback)
     sp = _try_parse_sympy(pred)
     sg = _try_parse_sympy(gold)
     if sp is not None and sg is not None:
         try:
-            from sympy import simplify, Eq
+            from sympy import simplify
             diff = simplify(sp - sg)
             if diff == 0 or diff.is_zero:
-                return True
-            if simplify(Eq(sp, sg)) is True:
                 return True
         except Exception:
             pass

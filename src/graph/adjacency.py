@@ -100,12 +100,17 @@ class LearnableAdjacency(nn.Module):
             raise ValueError("allowed_edges_mask must have the same shape as prior")
         self.register_buffer("allowed_edges_mask", allowed_edges_mask.to(dtype=torch.bool))
 
-        # Initialize logits: prior=1 -> +scale, prior=0 -> -scale
-        init_logits = torch.where(
-            prior > 0.5,
-            torch.full_like(prior, init_scale, dtype=torch.float32),
-            torch.full_like(prior, -init_scale, dtype=torch.float32),
-        )
+        # Initialize logits.
+        # When init_scale=0: all valid edges start at σ(0)=0.5 (full exploration).
+        # Otherwise: prior edges → +scale (σ≈1), non-prior → -scale (σ≈0).
+        if init_scale == 0.0:
+            init_logits = torch.zeros_like(prior, dtype=torch.float32)
+        else:
+            init_logits = torch.where(
+                prior > 0.5,
+                torch.full_like(prior, init_scale, dtype=torch.float32),
+                torch.full_like(prior, -init_scale, dtype=torch.float32),
+            )
 
         # Mask out any illegal edges, including diagonal/self-loops.
         init_logits[~self.allowed_edges_mask] = float("-inf")

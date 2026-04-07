@@ -876,6 +876,7 @@ def train(config_path: str, max_samples: int | None = None):
             graph_loss_val = output["graph_loss"].item()
             graph_loss_bce_val = output["graph_loss_bce"].item()
             graph_loss_sparse_val = output["graph_loss_sparse"].item()
+            graph_loss_conc_val = output["graph_loss_concentrate"].item()
             del loss, output
             torch.cuda.empty_cache()
 
@@ -915,6 +916,7 @@ def train(config_path: str, max_samples: int | None = None):
                             "train/graph_loss": graph_loss_val,
                             "train/graph_loss_bce": graph_loss_bce_val,
                             "train/graph_loss_sparse": graph_loss_sparse_val,
+                            "train/graph_loss_concentrate": graph_loss_conc_val,
                             "train/comp_grad": comp_grad,
                             "train/proj_grad": proj_grad,
                             "train/adj_grad": adj_grad,

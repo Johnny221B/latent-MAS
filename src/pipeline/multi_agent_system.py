@@ -238,10 +238,11 @@ class MultiAgentSystem(nn.Module):
         self.task_loss_fn = TaskLoss()  # "ce" or "reward"
         training_cfg = config.get("training", {})
         self.graph_loss_fn = GraphLoss(
-            lambda_struct=training_cfg.get("lambda_struct", 0.1),
+            lambda_struct=training_cfg.get("lambda_struct", 0.0),
             lambda_sparse=training_cfg.get("lambda_sparse", 0.01),
+            lambda_concentrate=training_cfg.get("lambda_concentrate", 0.1),
             w_add=training_cfg.get("w_add", 1.0),
-            w_drop=training_cfg.get("w_drop", 5.0),
+            w_drop=training_cfg.get("w_drop", 3.0),
         )
 
     def forward(
@@ -313,6 +314,7 @@ class MultiAgentSystem(nn.Module):
                 "graph_loss": graph_loss_dict["loss"],
                 "graph_loss_bce": graph_loss_dict["loss_bce"],
                 "graph_loss_sparse": graph_loss_dict["loss_sparse"],
+                "graph_loss_concentrate": graph_loss_dict["loss_concentrate"],
             })
         else:
             result["generated_text"] = dag_output["generated_text"]

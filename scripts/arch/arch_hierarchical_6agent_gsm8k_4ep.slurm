@@ -17,7 +17,7 @@ conda activate verl
 
 echo "=== Train: hierarchical_6agent (GSM8K, 4ep, Qwen3-4B) ==="
 torchrun --master_port=29728 --nproc_per_node=2 \
-  src/cli/train.py --config configs/experiments/arch/arch_hierarchical_6agent_4b_gsm8k_4ep.yaml
+  src/cli/train.py --config configs/experiments/arch/arch_hierarchical_6agent_4b_gsm8k_4ep_bf16.yaml
 
 CKPT=$(ls -td outputs/arch_gsm8k_4ep/hierarchical_6agent_* 2>/dev/null | head -1)
 echo "Checkpoint: ${CKPT}"
@@ -30,6 +30,8 @@ torchrun --master_port=29729 --nproc_per_node=1 \
   --eval-config configs/eval/gsm8k.yaml \
   --max-new-tokens 8192 \
   --output-dir ${CKPT}/gsm8k_eval \
-  --max_samples -1 --batch-size 4
+  --max_samples 100 --batch-size 4
 
 echo "=== DONE ==="
+
+# arch_hierarchical_6agent_4b_gsm8k_4ep_bf16
