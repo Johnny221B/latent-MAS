@@ -1,0 +1,10 @@
+task: gsm8k
+split: test
+max_new_tokens: 4096
+max_samples: -1
+inference_mode: chat_with_prefix
+use_terminal_prefix: true
+do_sample: false
+write_agent_logs: true
+batch_size: 16
+worker: 2

@@ -1,0 +1,29 @@
+
+[API eval] endpoint : http://localhost:8080/v1
+[API eval] model    : Qwen/Qwen3-4B
+[API eval] workers  : 4
+[API eval] do_sample: False
+
+Loading aime2025 test set...
+Test samples: 30
+
+Running API evaluation...
+API Eval aime2025:   0%|          | 0/30 [00:00<?, ?it/s]API Eval aime2025:   3%|▎         | 1/30 [00:21<10:27, 21.64s/it]API Eval aime2025:   7%|▋         | 2/30 [00:23<04:43, 10.13s/it]API Eval aime2025:  10%|█         | 3/30 [00:25<02:46,  6.16s/it]/data1/toby/latent-MAS/.venv/lib/python3.11/site-packages/sympy/parsing/latex/_parse_latex_antlr.py:23: UserWarning: antlr4.error.ErrorListener module is not installed
+  ErrorListener = import_module('antlr4.error.ErrorListener',
+API Eval aime2025:  13%|█▎        | 4/30 [00:32<02:55,  6.76s/it]API Eval aime2025:  17%|█▋        | 5/30 [00:46<03:54,  9.39s/it]API Eval aime2025:  20%|██        | 6/30 [00:57<03:53,  9.74s/it]API Eval aime2025:  23%|██▎       | 7/30 [01:01<03:00,  7.86s/it]API Eval aime2025:  27%|██▋       | 8/30 [01:02<02:08,  5.82s/it]API Eval aime2025:  30%|███       | 9/30 [01:09<02:09,  6.16s/it]API Eval aime2025:  33%|███▎      | 10/30 [01:10<01:27,  4.39s/it]API Eval aime2025:  33%|███▎      | 10/30 [01:10<01:27,  4.39s/it, acc=40.0%]API Eval aime2025:  37%|███▋      | 11/30 [01:27<02:39,  8.38s/it, acc=40.0%]API Eval aime2025:  40%|████      | 12/30 [01:30<02:00,  6.72s/it, acc=40.0%]API Eval aime2025:  43%|████▎     | 13/30 [01:30<01:21,  4.80s/it, acc=40.0%]API Eval aime2025:  47%|████▋     | 14/30 [01:43<01:53,  7.11s/it, acc=40.0%]API Eval aime2025:  50%|█████     | 15/30 [01:44<01:19,  5.28s/it, acc=40.0%]API Eval aime2025:  53%|█████▎    | 16/30 [01:50<01:18,  5.61s/it, acc=40.0%]API Eval aime2025:  57%|█████▋    | 17/30 [01:54<01:06,  5.15s/it, acc=40.0%]API Eval aime2025:  60%|██████    | 18/30 [01:59<01:00,  5.02s/it, acc=40.0%]API Eval aime2025:  63%|██████▎   | 19/30 [02:04<00:56,  5.12s/it, acc=40.0%]API Eval aime2025:  67%|██████▋   | 20/30 [02:07<00:42,  4.30s/it, acc=40.0%]API Eval aime2025:  67%|██████▋   | 20/30 [02:07<00:42,  4.30s/it, acc=20.0%]API Eval aime2025:  70%|███████   | 21/30 [02:18<00:57,  6.44s/it, acc=20.0%]API Eval aime2025:  73%|███████▎  | 22/30 [02:19<00:39,  4.89s/it, acc=20.0%]API Eval aime2025:  77%|███████▋  | 23/30 [02:27<00:39,  5.65s/it, acc=20.0%]API Eval aime2025:  80%|████████  | 24/30 [02:29<00:27,  4.55s/it, acc=20.0%]API Eval aime2025:  83%|████████▎ | 25/30 [02:40<00:32,  6.43s/it, acc=20.0%]API Eval aime2025:  87%|████████▋ | 26/30 [02:48<00:27,  6.94s/it, acc=20.0%]API Eval aime2025:  90%|█████████ | 27/30 [02:59<00:24,  8.19s/it, acc=20.0%]API Eval aime2025:  93%|█████████▎| 28/30 [03:05<00:15,  7.63s/it, acc=20.0%]API Eval aime2025:  97%|█████████▋| 29/30 [03:07<00:05,  5.97s/it, acc=20.0%]API Eval aime2025: 100%|██████████| 30/30 [03:40<00:00, 14.06s/it, acc=20.0%]API Eval aime2025: 100%|██████████| 30/30 [03:40<00:00, 14.06s/it, acc=13.3%]API Eval aime2025: 100%|██████████| 30/30 [03:40<00:00,  7.36s/it, acc=13.3%]
+
+============================================================
+  EVALUATION RESULTS (API / text mode)
+============================================================
+  Task:     aime2025
+  Split:    test
+  Samples:  30
+  Valid:    29
+  Truncated:1
+  Correct:  4
+  Accuracy: 13.33% (all)  |  13.79% (valid)
+  Time:     220.8s total  |  25.77s/sample (avg latency)
+  Avg gen tokens: 920.0 (all agents per sample)
+  Throughput:     125.0 tok/s  (wall-clock)
+============================================================
+  Results saved: /data1/toby/latent-MAS/arch_baseline_4b/two_path/aime2025/eval_results.json
