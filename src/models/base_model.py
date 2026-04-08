@@ -21,6 +21,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -133,6 +134,11 @@ class BaseModelWrapper(nn.Module):
             param.requires_grad = False
         self.base_model_trainable = False
         self.model.eval()
+
+    def enable_gradient_checkpointing(self):
+        """Enable gradient checkpointing to reduce memory when allowing
+        gradients to flow through the frozen model forward pass."""
+        self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     def set_trainable(self, trainable: bool) -> None:
         self.base_model_trainable = trainable

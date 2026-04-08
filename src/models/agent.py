@@ -306,18 +306,18 @@ class Agent:
         input_ids = tokenized["input_ids"].to(task_token_ids.device)
         attention_mask = tokenized["attention_mask"].to(task_token_ids.device)
 
-        # Latent reasoning in continuous space (no grad needed — frozen model)
-        with torch.no_grad():
-            output = self.base_model.latent_reasoning(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                prefix_embeds=upstream_prefix if upstream_prefix_kv is None else None,
-                past_key_values=upstream_prefix_kv,
-                num_latent_steps=self.reasoning_steps,
-            )
-
-        # Detach trajectory but keep it as a regular tensor for compressor
-        output["hidden_trajectory"] = output["hidden_trajectory"].detach()
+        # Latent reasoning — keep gradient graph so task loss can backprop
+        # through the full DAG (upstream prefix → frozen model → hidden states
+        # → compressor → downstream prefix). Frozen model params have
+        # requires_grad=False so they won't accumulate gradients, but the
+        # computation graph for input tensors (upstream_prefix_kv) is preserved.
+        output = self.base_model.latent_reasoning(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            prefix_embeds=upstream_prefix if upstream_prefix_kv is None else None,
+            past_key_values=upstream_prefix_kv,
+            num_latent_steps=self.reasoning_steps,
+        )
 
         trajectory = output["hidden_trajectory"]  # [B, m, D]
         B, m, D = trajectory.shape
