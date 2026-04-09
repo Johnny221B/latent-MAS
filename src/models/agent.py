@@ -520,10 +520,13 @@ class Agent:
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
             
             prompt_len = input_ids.shape[1]
-            generated_ids = [
-                sequences[row_idx][prompt_len:].tolist() 
-                for row_idx in range(sequences.shape[0])
-            ]
+            generated_ids = []
+            for row_idx in range(sequences.shape[0]):
+                ids = sequences[row_idx][prompt_len:].tolist()
+                # Strip trailing pad tokens
+                while ids and ids[-1] == pad_token_id:
+                    ids.pop()
+                generated_ids.append(ids)
 
             return self._finalize_generation_outputs(
                 tokenizer=self.base_model.tokenizer,
@@ -572,7 +575,12 @@ class Agent:
 
             gen_out = generation_model.generate(**generate_kwargs)
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
-            generated_ids = [sequences[row_idx].tolist() for row_idx in range(sequences.shape[0])]
+            generated_ids = []
+            for row_idx in range(sequences.shape[0]):
+                ids = sequences[row_idx].tolist()
+                while ids and ids[-1] == pad_token_id:
+                    ids.pop()
+                generated_ids.append(ids)
 
             return self._finalize_generation_outputs(
                 tokenizer=self.base_model.tokenizer,
@@ -604,10 +612,12 @@ class Agent:
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
             
             prompt_len = input_ids.shape[1]
-            generated_token_ids = [
-                sequences[row_idx][prompt_len:].tolist()
-                for row_idx in range(sequences.shape[0])
-            ]
+            generated_token_ids = []
+            for row_idx in range(sequences.shape[0]):
+                ids = sequences[row_idx][prompt_len:].tolist()
+                while ids and ids[-1] == pad_token_id:
+                    ids.pop()
+                generated_token_ids.append(ids)
             
             return self._finalize_generation_outputs(
                 tokenizer=self.base_model.tokenizer,
