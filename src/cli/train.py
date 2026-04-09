@@ -611,11 +611,18 @@ def train(config_path: str, max_samples: int | None = None):
                 system.base_model.model,
                 **ddp_kwargs,
             )
-        # Wrap compressor with DDP
-        system.compressor = DDP(
-            system.compressor,
-            **ddp_kwargs,
-        )
+        # Wrap compressor(s) with DDP
+        if system.compressors is not None:
+            for idx in range(len(system.compressors)):
+                system.compressors[idx] = DDP(
+                    system.compressors[idx],
+                    **ddp_kwargs,
+                )
+        elif system.compressor is not None:
+            system.compressor = DDP(
+                system.compressor,
+                **ddp_kwargs,
+            )
         # Wrap prefix_projector(s) with DDP
         if system.prefix_projectors is not None:
             for key in list(system.prefix_projectors.keys()):
@@ -722,7 +729,10 @@ def train(config_path: str, max_samples: int | None = None):
     non_adj_params = []
     if training_cfg.get("train_strategy") == "full_finetune":
         non_adj_params.extend(system.base_model.model.parameters())
-    non_adj_params.extend(system.compressor.parameters())
+    if system.compressors is not None:
+        non_adj_params.extend(system.compressors.parameters())
+    elif system.compressor is not None:
+        non_adj_params.extend(system.compressor.parameters())
     if system.prefix_projectors is not None:
         non_adj_params.extend(system.prefix_projectors.parameters())
     elif system.prefix_projector is not None:
@@ -771,7 +781,14 @@ def train(config_path: str, max_samples: int | None = None):
     grad_accum_steps = training_cfg.get("gradient_accumulation_steps", 1)
     log_interval = training_cfg.get("log_interval", 1)
     save_interval = training_cfg.get("save_interval", 500)
-    compressor = system.compressor.module if is_ddp else system.compressor
+    if system.compressors is not None:
+        compressor_modules = [
+            (c.module if is_ddp else c) for c in system.compressors
+        ]
+        compressor = None  # not used for single compressor
+    else:
+        compressor = system.compressor.module if is_ddp else system.compressor
+        compressor_modules = None
     # Unwrap prefix_projector(s) for checkpoint save/load
     if system.prefix_projectors is not None:
         prefix_projector = None
@@ -944,7 +961,9 @@ def train(config_path: str, max_samples: int | None = None):
                 mem = torch.cuda.max_memory_allocated(device) / 1024**3
                 scaler.unscale_(optimizer)
                 # Compute grad norms AFTER unscale so they reflect true magnitudes
-                comp_grad = compute_grad_norm(compressor.parameters())
+                comp_grad = compute_grad_norm(
+                    [p for c in compressor_modules for p in c.parameters()]
+                ) if compressor_modules is not None else compute_grad_norm(compressor.parameters())
                 adj_grad = compute_grad_norm([adjacency.logits])
                 if prefix_projectors_unwrapped is not None:
                     proj_grad = compute_grad_norm(
@@ -1057,7 +1076,10 @@ def train(config_path: str, max_samples: int | None = None):
 
             # ── Logging (main process only) ──
             if is_main_process() and (batch_idx + 1) % log_interval == 0:
-                display_comp_grad = comp_grad if comp_grad is not None else compute_grad_norm(compressor.parameters())
+                display_comp_grad = comp_grad if comp_grad is not None else (
+                    compute_grad_norm([p for c in compressor_modules for p in c.parameters()])
+                    if compressor_modules is not None else compute_grad_norm(compressor.parameters())
+                )
                 if proj_grad is not None:
                     display_proj_grad = proj_grad
                 elif prefix_projectors_unwrapped is not None:
@@ -1131,8 +1153,11 @@ def train(config_path: str, max_samples: int | None = None):
                     "epoch": epoch,
                     "next_batch_idx": batch_idx + 1,
                     "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
-                    "compressor_state": compressor.state_dict(),
-                    "prefix_projector_state": (
+                    "compressor_state": (
+                        [c.state_dict() for c in compressor_modules]
+                        if compressor_modules is not None
+                        else compressor.state_dict()
+                    ),                    "prefix_projector_state": (
                         {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
                         if prefix_projectors_unwrapped is not None
                         else prefix_projector.state_dict() if prefix_projector is not None
@@ -1225,7 +1250,11 @@ def train(config_path: str, max_samples: int | None = None):
                 "epoch": training_cfg["epochs"],
                 "next_batch_idx": 0,
                 "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
-                "compressor_state": compressor.state_dict(),
+                "compressor_state": (
+                    [c.state_dict() for c in compressor_modules]
+                    if compressor_modules is not None
+                    else compressor.state_dict()
+                ),
                 "prefix_projector_state": (
                     {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
                     if prefix_projectors_unwrapped is not None

@@ -67,9 +67,10 @@ class DAGExecutor:
         self,
         agents: list[Agent],
         adjacency: torch.Tensor,
-        compressor: LatentCompressor,
+        compressor: LatentCompressor | None,
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
+        compressors: list[LatentCompressor] | None = None,
         prefix_projector: PrefixProjector | None = None,
         training: bool = True,
         answer_ids: torch.LongTensor | None = None,
@@ -142,6 +143,12 @@ class DAGExecutor:
                 return hidden
             return hidden_projections[key](hidden)
 
+        def get_compressor_for(agent_index: int) -> LatentCompressor:
+            """Resolve compressor: per-agent if available, else shared."""
+            if compressors is not None:
+                return compressors[agent_index]
+            return compressor
+
         def summarize_tensor(name: str, value: torch.Tensor | None) -> dict | None:
             if value is None:
                 return None
@@ -203,7 +210,7 @@ class DAGExecutor:
             S_j = agent_output["hidden_trajectory"]
             S_j = project_hidden(j, S_j)
             mask_j = agent_output["compressor_mask"]
-            P_j = compressor(S_j, mask=mask_j)
+            P_j = get_compressor_for(j)(S_j, mask=mask_j)
             all_prefixes[j] = P_j
             if collect_agent_logs:
                 agent_logs.append({
@@ -301,7 +308,7 @@ class DAGExecutor:
                 traj_to_compress = agent_traj[:, -k:, :]
                 mask_j = torch.ones(B, k, device=trajectory.device)
                 S_j = project_hidden(j, traj_to_compress)
-                P_j = compressor(S_j, mask=mask_j)
+                P_j = get_compressor_for(j)(S_j, mask=mask_j)
                 all_prefixes[j] = P_j
                 if collect_agent_logs:
                     agent_logs.append({

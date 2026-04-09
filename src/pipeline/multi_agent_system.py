@@ -196,14 +196,25 @@ class MultiAgentSystem(nn.Module):
             target_norm = embed_weight.norm(dim=1).mean().item()
 
         compressor_cfg = config.get("compressor", {})
-        self.compressor = LatentCompressor(
-            hidden_dim=hidden_dim,
-            num_queries=compressor_cfg.get("num_queries", 16),
-            num_heads=compressor_cfg.get("num_heads", 8),
-            dropout=compressor_cfg.get("dropout", 0.1),
-            num_layers=compressor_cfg.get("num_layers", 1),
-            target_norm=target_norm,
-        )
+        per_agent_compressor = compressor_cfg.get("per_agent", False)
+
+        def _make_compressor():
+            return LatentCompressor(
+                hidden_dim=hidden_dim,
+                num_queries=compressor_cfg.get("num_queries", 16),
+                num_heads=compressor_cfg.get("num_heads", 8),
+                dropout=compressor_cfg.get("dropout", 0.1),
+                num_layers=compressor_cfg.get("num_layers", 1),
+                target_norm=target_norm,
+            )
+
+        if per_agent_compressor:
+            # Each non-terminal agent gets its own compressor
+            self.compressors = nn.ModuleList([_make_compressor() for _ in range(self.n_agents)])
+            self.compressor = None  # not used
+        else:
+            self.compressor = _make_compressor()
+            self.compressors = None
 
         # ── Trainable: PrefixProjectors (per unique model architecture) ──
         # Each model type needs its own PrefixProjector because KV cache
@@ -251,7 +262,10 @@ class MultiAgentSystem(nn.Module):
         # ── Cast trainable components to model dtype (bf16) ──
         model_dtype = BaseModelWrapper._resolve_dtype(model_cfg.get("dtype"))
         if model_dtype != torch.float32:
-            self.compressor.to(dtype=model_dtype)
+            if self.compressors is not None:
+                self.compressors.to(dtype=model_dtype)
+            elif self.compressor is not None:
+                self.compressor.to(dtype=model_dtype)
             if self.prefix_projectors is not None:
                 self.prefix_projectors.to(dtype=model_dtype)
             elif self.prefix_projector is not None:
@@ -290,6 +304,7 @@ class MultiAgentSystem(nn.Module):
             agents=self.agents,
             adjacency=A,
             compressor=self.compressor,
+            compressors=self.compressors,
             prefix_projector=self.prefix_projector,
             task_token_ids=task_token_ids,
             task_attention_mask=task_attention_mask,
@@ -364,7 +379,10 @@ class MultiAgentSystem(nn.Module):
         params = []
         if self.config.get("training", {}).get("train_strategy") == "full_finetune":
             params.extend(self.base_model.model.parameters())
-        params.extend(self.compressor.parameters())
+        if self.compressors is not None:
+            params.extend(self.compressors.parameters())
+        elif self.compressor is not None:
+            params.extend(self.compressor.parameters())
         if not self.freeze_topology:
             params.extend(self.adjacency.parameters())
         # Hidden projections (heterogeneous model alignment)
