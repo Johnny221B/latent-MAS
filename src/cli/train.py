@@ -516,6 +516,57 @@ def maybe_build_probe_wandb_table(run, samples: list[dict]):
     return table
 
 
+def compute_per_edge_adjacency_stats(
+    adjacency,
+    graph_loss_fn,
+    agent_roles: list[str],
+    grad_accum_steps: int = 1,
+) -> dict:
+    """Capture per-edge adjacency dynamics at each optimizer step.
+
+    Returns a dict with:
+      - edges: list of {src, dst, weight, total_grad, graph_grad, task_grad, sigmoid_deriv}
+      - summary: aggregate stats
+    """
+    with torch.no_grad():
+        A = adjacency.get_adjacency()
+        logits = adjacency.logits
+        total_grad = logits.grad.clone() if logits.grad is not None else torch.zeros_like(logits)
+        allowed = adjacency.allowed_edges_mask
+
+    # Compute graph-loss-only gradient analytically (cheap, no model forward needed)
+    logits_detached = logits.detach().clone().requires_grad_(True)
+    A_detached = torch.sigmoid(logits_detached)
+    graph_loss_only = graph_loss_fn(
+        A_detached, adjacency.prior, valid_mask=adjacency.allowed_edges_mask,
+    )
+    graph_loss_only["loss"].backward()
+    graph_grad = logits_detached.grad / grad_accum_steps  # match scaling
+
+    n = A.shape[0]
+    edges = []
+    for i in range(n):
+        for j in range(n):
+            if not allowed[i, j]:
+                continue
+            w = float(A[i, j].item())
+            tg = float(total_grad[i, j].item())
+            gg = float(graph_grad[i, j].item())
+            sig_d = w * (1.0 - w)  # sigmoid derivative
+            edges.append({
+                "src": agent_roles[i] if i < len(agent_roles) else str(i),
+                "dst": agent_roles[j] if j < len(agent_roles) else str(j),
+                "weight": round(w, 6),
+                "logit": round(float(logits[i, j].item()), 4),
+                "total_grad": round(tg, 8),
+                "graph_grad": round(gg, 8),
+                "task_grad": round(tg - gg, 8),
+                "sigmoid_deriv": round(sig_d, 8),
+            })
+
+    return {"edges": edges}
+
+
 def train(config_path: str, max_samples: int | None = None):
     config = load_config(config_path)
     training_cfg = config["training"]
@@ -681,8 +732,12 @@ def train(config_path: str, max_samples: int | None = None):
 
     param_groups = [
         {"params": non_adj_params, "lr": base_lr},
-        {"params": list(system.adjacency.parameters()), "lr": adj_lr},
     ]
+    freeze_topology = bool(config.get("graph", {}).get("freeze_topology", False))
+    if not freeze_topology:
+        param_groups.append({"params": list(system.adjacency.parameters()), "lr": adj_lr})
+    elif is_main_process():
+        print("Adjacency topology frozen — not included in optimizer")
     optimizer = AdamW(param_groups, weight_decay=weight_decay)
     if is_main_process() and adj_lr != base_lr:
         print(f"Using separate adjacency lr: {adj_lr} (base lr: {base_lr})")
@@ -781,6 +836,7 @@ def train(config_path: str, max_samples: int | None = None):
 
     # ── Loss log ──
     loss_log = []  # list of dicts, saved to CSV
+    adjacency_log = []  # per-edge dynamics
     probe_history = []
     probe_history_path = output_dir / "probe_history.json"
     probe_metadata_path = output_dir / "probe_split.json"
@@ -826,6 +882,7 @@ def train(config_path: str, max_samples: int | None = None):
             comp_grad = None
             adj_grad = None
             proj_grad = None
+            adj_stats = None
             mem = None
 
             # ── Tokenize ──
@@ -882,9 +939,7 @@ def train(config_path: str, max_samples: int | None = None):
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 # ── Sync adjacency gradients across GPUs (manual allreduce) ──
-                # Must be inside the accumulation gate so it runs once per optimizer step,
-                # not once per micro-batch (which would shrink adj gradients).
-                if is_ddp and adjacency.logits.grad is not None:
+                if is_ddp and not freeze_topology and adjacency.logits.grad is not None:
                     dist.all_reduce(adjacency.logits.grad, op=dist.ReduceOp.AVG)
                 mem = torch.cuda.max_memory_allocated(device) / 1024**3
                 scaler.unscale_(optimizer)
@@ -899,6 +954,16 @@ def train(config_path: str, max_samples: int | None = None):
                     proj_grad = compute_grad_norm(prefix_projector.parameters())
                 else:
                     proj_grad = 0.0
+                # ── Per-edge adjacency monitoring ──
+                adj_stats = None
+                if is_main_process():
+                    adj_stats = compute_per_edge_adjacency_stats(
+                        adjacency=adjacency,
+                        graph_loss_fn=system.graph_loss_fn,
+                        agent_roles=system.agent_roles,
+                        grad_accum_steps=grad_accum_steps,
+                    )
+
                 torch.nn.utils.clip_grad_norm_(system.get_trainable_params(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
@@ -1021,6 +1086,20 @@ def train(config_path: str, max_samples: int | None = None):
                     f"elapsed:{format_duration(elapsed_seconds)} "
                     f"eta:{format_duration(eta_seconds)}"
                 )
+                # Print per-edge adjacency dynamics
+                if adj_stats is not None:
+                    edge_strs = []
+                    for e in adj_stats["edges"]:
+                        edge_strs.append(
+                            f"    {e['src']:>8s}→{e['dst']:<8s} "
+                            f"w={e['weight']:.4f} logit={e['logit']:+.2f} "
+                            f"∇total={e['total_grad']:+.2e} "
+                            f"∇task={e['task_grad']:+.2e} "
+                            f"∇graph={e['graph_grad']:+.2e} "
+                            f"σ'={e['sigmoid_deriv']:.2e}"
+                        )
+                    print("  Adjacency edges:")
+                    print("\n".join(edge_strs))
                 
             # ── Record loss ──
             if is_main_process():
@@ -1035,6 +1114,14 @@ def train(config_path: str, max_samples: int | None = None):
                     "proj_grad": proj_grad,
                     "adj_grad": adj_grad,
                 })
+                # Record per-edge adjacency dynamics
+                if adj_stats is not None:
+                    adjacency_log.append({
+                        "global_step": global_step,
+                        "task_loss": task_loss_val,
+                        "graph_loss": graph_loss_val,
+                        "edges": adj_stats["edges"],
+                    })
 
             # ── Checkpoint (main process only) ──
             if is_main_process() and should_save_checkpoint(global_step=global_step, save_interval=save_interval):
@@ -1090,6 +1177,11 @@ def train(config_path: str, max_samples: int | None = None):
                 writer = csv.DictWriter(f, fieldnames=loss_log[0].keys())
                 writer.writeheader()
                 writer.writerows(loss_log)
+
+            # Save per-edge adjacency dynamics
+            adj_log_path = output_dir / "adjacency_log.json"
+            with open(adj_log_path, "w", encoding="utf-8") as f:
+                json.dump(adjacency_log, f, indent=2, ensure_ascii=False)
 
     eval_summaries = {}
     if evaluation_cfg.get("run_after_train", False):

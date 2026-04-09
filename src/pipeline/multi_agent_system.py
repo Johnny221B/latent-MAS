@@ -230,9 +230,13 @@ class MultiAgentSystem(nn.Module):
             allowed_edges_mask=allowed_edges_mask,
             init_scale=graph_init_scale,
         )
+        self.freeze_topology = bool(config.get("graph", {}).get("freeze_topology", False))
+        if self.freeze_topology:
+            self.adjacency.logits.requires_grad_(False)
 
         # ── Executor (stateless) ──
-        self.executor = DAGExecutor(aggregator=MessageAggregator())
+        aggregation_mode = config.get("graph", {}).get("aggregation_mode", "weighted_sum")
+        self.executor = DAGExecutor(aggregator=MessageAggregator(mode=aggregation_mode))
 
         # ── Losses ──
         self.task_loss_fn = TaskLoss()  # "ce" or "reward"
@@ -300,11 +304,19 @@ class MultiAgentSystem(nn.Module):
             )
 
             task_loss = self.task_loss_fn(final_logits, labels)
-            graph_loss_dict = self.graph_loss_fn(
-                A,
-                self.adjacency.prior,
-                valid_mask=self.adjacency.allowed_edges_mask,
-            )
+            if self.freeze_topology:
+                graph_loss_dict = {
+                    "loss": torch.tensor(0.0, device=task_loss.device),
+                    "loss_bce": torch.tensor(0.0, device=task_loss.device),
+                    "loss_sparse": torch.tensor(0.0, device=task_loss.device),
+                    "loss_concentrate": torch.tensor(0.0, device=task_loss.device),
+                }
+            else:
+                graph_loss_dict = self.graph_loss_fn(
+                    A,
+                    self.adjacency.prior,
+                    valid_mask=self.adjacency.allowed_edges_mask,
+                )
             total_loss = task_loss + graph_loss_dict["loss"]
 
             result.update({
@@ -330,7 +342,8 @@ class MultiAgentSystem(nn.Module):
         if self.config.get("training", {}).get("train_strategy") == "full_finetune":
             params.extend(self.base_model.model.parameters())
         params.extend(self.compressor.parameters())
-        params.extend(self.adjacency.parameters())
+        if not self.freeze_topology:
+            params.extend(self.adjacency.parameters())
         # Hidden projections (heterogeneous model alignment)
         if self.hidden_projections:
             params.extend(self.hidden_projections.parameters())
