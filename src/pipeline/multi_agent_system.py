@@ -233,10 +233,12 @@ class MultiAgentSystem(nn.Module):
 
         # ── Trainable: Adjacency ──
         graph_init_scale = float(config.get("graph", {}).get("init_scale", 6.0))
+        graph_fixed_structure = bool(config.get("graph", {}).get("fixed_structure", False))
         self.adjacency = LearnableAdjacency(
             prior=prior,
             allowed_edges_mask=allowed_edges_mask,
             init_scale=graph_init_scale,
+            fixed_structure=graph_fixed_structure,
         )
         self.freeze_topology = bool(config.get("graph", {}).get("freeze_topology", False))
         if self.freeze_topology:
@@ -245,6 +247,18 @@ class MultiAgentSystem(nn.Module):
         # ── Executor (stateless) ──
         aggregation_mode = config.get("graph", {}).get("aggregation_mode", "weighted_sum")
         self.executor = DAGExecutor(aggregator=MessageAggregator(mode=aggregation_mode))
+
+        # ── Cast trainable components to model dtype (bf16) ──
+        model_dtype = BaseModelWrapper._resolve_dtype(model_cfg.get("dtype"))
+        if model_dtype != torch.float32:
+            self.compressor.to(dtype=model_dtype)
+            if self.prefix_projectors is not None:
+                self.prefix_projectors.to(dtype=model_dtype)
+            elif self.prefix_projector is not None:
+                self.prefix_projector.to(dtype=model_dtype)
+            if self.hidden_projections:
+                self.hidden_projections.to(dtype=model_dtype)
+            self.adjacency.to(dtype=model_dtype)
 
         # ── Losses ──
         self.task_loss_fn = TaskLoss()  # "ce" or "reward"
@@ -295,6 +309,7 @@ class MultiAgentSystem(nn.Module):
             agent_projection_keys=self._agent_projection_keys,
             prefix_projectors=self.prefix_projectors,
             agent_model_keys=self._agent_model_keys,
+            e2e_gradient=bool(self.config.get("training", {}).get("e2e_gradient", False)),
         )
 
         result = {"adjacency": A}

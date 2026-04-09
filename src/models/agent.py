@@ -317,6 +317,7 @@ class Agent:
             prefix_embeds=upstream_prefix if upstream_prefix_kv is None else None,
             past_key_values=upstream_prefix_kv,
             num_latent_steps=self.reasoning_steps,
+            grad_last_k=self.compress_last_k,
         )
 
         trajectory = output["hidden_trajectory"]  # [B, m, D]

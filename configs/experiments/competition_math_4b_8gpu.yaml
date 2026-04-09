@@ -1,5 +1,5 @@
 model:
-  name: "/mnt/3fs/data/yfzhang/workspace/toby/latent-MAS/.cache/Qwen3-4B"
+  name: "/mnt/3fs/data/yfzhang/workspace/toby/latent-MAS/.cache/Qwen3-1.7B"
   frozen: true
   dtype: "bfloat16"
   enable_thinking: true
@@ -7,6 +7,7 @@ model:
 graph:
   config: "configs/graphs/hierarchical_6agent.json"
   init_scale: 0.0
+  fixed_structure: false
   freeze_topology: false
   aggregation_mode: "concat"
   roles_dir: "configs/roles"
@@ -23,7 +24,7 @@ training:
   input_mode: "chat_with_prefix"
   e2e_gradient: true
   batch_size: 8
-  lr: 0.000001
+  lr: 0.00001
   adjacency_lr: 0.01
   weight_decay: 0.01
   epochs: 2
@@ -32,7 +33,7 @@ training:
   lambda_sparse: 0.001
   lambda_concentrate: 0.02
   use_amp: true
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   log_interval: 1
   save_interval: 5000
   save_final_checkpoint: true
@@ -59,10 +60,10 @@ evaluation:
 
 reasoning:
   steps_per_agent: 5
-  compress_last_k: 5
+  compress_last_k: 2
 
 output:
-  dir: "outputs/dev/e2e_5step_concat"
+  dir: "outputs/dev/e2e_5step_1.7b_open_structure"
   log_dir: "logs"
 
 report:

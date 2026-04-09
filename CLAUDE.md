@@ -119,6 +119,24 @@ training:
   warmup_steps: 100      # linear warmup + cosine decay (0 = disabled)
 ```
 
+## Environment & Debugging
+
+### Python Environment
+- Use `uv` for all package management
+- Virtual environment: `.venv` (Python 3.11)
+- Setup: `uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt`
+
+### GPU Node (for debugging and execution)
+- **All program execution and debugging must go through SSH on the GPU node**
+- Connect: `ssh root@10.100.38.15 -p 24012`
+- Hostname: lg-cmc-b7r402-e03u16-h200-001221
+- GPUs: 8x NVIDIA H200 (143GB each)
+- **CRITICAL: The GPU node has NO internet/network access — cannot pip install, download models, or fetch remote resources. All files and dependencies must already be present on the node.**
+
+### Code Editing
+- Edit code in the worktree: `.claude/worktrees/prev-commit/`
+- The worktree is based on commit `9595207`
+
 ## Documentation Policy (from AGENTS.md)
 
 - `docs/training_pipeline.md` is the canonical description of the train/eval pipeline

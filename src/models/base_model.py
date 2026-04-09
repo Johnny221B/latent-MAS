@@ -497,6 +497,7 @@ class BaseModelWrapper(nn.Module):
         prefix_embeds: torch.Tensor | None = None,
         past_key_values=None,
         num_latent_steps: int = 40,
+        grad_last_k: int = 0,
     ) -> dict:
         """Auto-regressive latent reasoning (LatentMAS Section 3.1).
 
@@ -513,6 +514,10 @@ class BaseModelWrapper(nn.Module):
             attention_mask: [B, seq_len] or None
             prefix_embeds: [B, Lp, D] from upstream agents, or None
             num_latent_steps: m, number of latent reasoning steps
+            grad_last_k: number of final steps to keep gradient graph for.
+                         0 = all steps follow the outer context (no_grad or not).
+                         >0 = first (m - grad_last_k) steps use no_grad,
+                               last grad_last_k steps keep gradient graph.
 
         Returns:
             dict with:
@@ -574,6 +579,8 @@ class BaseModelWrapper(nn.Module):
 
         # ── Step 2: Latent reasoning loop ──
         hidden_trajectory = []
+        # Determine which steps need gradient
+        grad_start = num_latent_steps - grad_last_k if grad_last_k > 0 else -1
 
         for step in range(num_latent_steps):
             # Align h_t to input embedding space
@@ -588,20 +595,37 @@ class BaseModelWrapper(nn.Module):
                 device=device,
             )
 
-            # Forward with KV cache (single latent token)
-            outputs = self.model(
-                inputs_embeds=latent_embed,
-                attention_mask=latent_mask,
-                past_key_values=past_kv,
-                use_cache=True,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            raw = self._parse_model_output(outputs, output_hidden_states=True)
-            past_kv = raw["past_key_values"]
-            last_hidden = raw["hidden_states"][-1][:, -1, :]  # [B, D]
+            # Early steps: no_grad (pure inference, save memory)
+            # Last grad_last_k steps: keep gradient graph
+            use_no_grad = grad_last_k > 0 and step < grad_start
 
-            hidden_trajectory.append(last_hidden.unsqueeze(1))  # [B, 1, D]
+            if use_no_grad:
+                with torch.no_grad():
+                    outputs = self.model(
+                        inputs_embeds=latent_embed,
+                        attention_mask=latent_mask,
+                        past_key_values=past_kv,
+                        use_cache=True,
+                        output_hidden_states=True,
+                        return_dict=True,
+                    )
+                    raw = self._parse_model_output(outputs, output_hidden_states=True)
+                    past_kv = raw["past_key_values"]
+                    last_hidden = raw["hidden_states"][-1][:, -1, :]
+                    hidden_trajectory.append(last_hidden.unsqueeze(1).detach())
+            else:
+                outputs = self.model(
+                    inputs_embeds=latent_embed,
+                    attention_mask=latent_mask,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                raw = self._parse_model_output(outputs, output_hidden_states=True)
+                past_kv = raw["past_key_values"]
+                last_hidden = raw["hidden_states"][-1][:, -1, :]
+                hidden_trajectory.append(last_hidden.unsqueeze(1))
 
         # Stack: [B, m, D]
         hidden_trajectory = torch.cat(hidden_trajectory, dim=1)

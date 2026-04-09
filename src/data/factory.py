@@ -1,33 +1,26 @@
 """Dataset registry and factory helpers."""
 
-from .aime2025 import build_task_configs as build_aime2025_task_configs
-from .aime2026 import build_task_configs as build_aime2026_task_configs
 from .am_deepseek_r1_distilled import build_task_configs as build_am_deepseek_r1_distilled_task_configs
-from .amc23 import build_task_configs as build_amc23_task_configs
 from .arc import build_task_configs as build_arc_task_configs
 from .base import MultiAgentDataset
 from .competition_math import build_task_configs as build_competition_math_task_configs
 from .gsm8k import build_task_configs as build_gsm8k_task_configs
 from .humaneval import build_task_configs as build_humaneval_task_configs
-from .math import build_task_configs as build_math_task_configs
-from .math500 import build_task_configs as build_math500_task_configs
-from .minerva_math import build_task_configs as build_minerva_math_task_configs
 
 
 def get_task_configs() -> dict:
     task_configs = {}
-    task_configs.update(build_aime2025_task_configs())
-    task_configs.update(build_aime2026_task_configs())
     task_configs.update(build_am_deepseek_r1_distilled_task_configs())
-    task_configs.update(build_amc23_task_configs())
     task_configs.update(build_gsm8k_task_configs())
     task_configs.update(build_arc_task_configs())
     task_configs.update(build_competition_math_task_configs())
     task_configs.update(build_humaneval_task_configs())
-    task_configs.update(build_math_task_configs())
-    task_configs.update(build_math500_task_configs())
-    task_configs.update(build_minerva_math_task_configs())
     return task_configs
+
+
+def create_dataset(task: str, split: str = "train", max_samples: int | None = None, **loader_kwargs) -> MultiAgentDataset:
+    return MultiAgentDataset(task=task, split=split, max_samples=max_samples, **loader_kwargs)
+
 
 
 def create_dataset(task: str, split: str = "train", max_samples: int | None = None, **loader_kwargs) -> MultiAgentDataset:

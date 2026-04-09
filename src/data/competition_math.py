@@ -1,18 +1,23 @@
 """Competition Math dataset helpers and config."""
 
+import json
+from pathlib import Path
+
 from .math import _extract_boxed_answer
 
+LOCAL_DATA_DIR = Path("/mnt/3fs/data/yfzhang/cache/local_datasets")
 
-def _load_hf_dataset(dataset_name: str, subset: str | None, split: str):
-    from datasets import load_dataset
 
-    return load_dataset(dataset_name, subset, split=split)
+def _load_local(split: str):
+    path = LOCAL_DATA_DIR / f"competition_math_train.json"
+    with open(path) as f:
+        return json.load(f)
 
 
 def build_task_configs() -> dict:
     return {
         "competition_math": {
-            "loader": lambda split: _load_hf_dataset("qwedsacf/competition_math", None, "train"),
+            "loader": _load_local,
             "allowed_splits": ("train",),
             "question_id_field": "problem",
             "question_field": "problem",

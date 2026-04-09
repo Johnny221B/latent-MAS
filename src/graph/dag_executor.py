@@ -87,6 +87,7 @@ class DAGExecutor:
         agent_projection_keys: list[str | None] | None = None,
         prefix_projectors: dict[str, PrefixProjector] | None = None,
         agent_model_keys: list[str] | None = None,
+        e2e_gradient: bool = False,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -287,6 +288,7 @@ class DAGExecutor:
                 prefix_embeds=batched_prefix_embeds if not use_kv else None,
                 past_key_values=batched_prefix_kv if use_kv else None,
                 num_latent_steps=reasoning_steps,
+                grad_last_k=compress_last_k,
             )
             del batched_prefix_kv
 
@@ -318,7 +320,7 @@ class DAGExecutor:
             nonterminal_in_level = [j for j in level if j != terminal_index]
             terminal_in_level = [j for j in level if j == terminal_index]
 
-            if len(nonterminal_in_level) > 1 and training:
+            if len(nonterminal_in_level) > 1 and training and not e2e_gradient:
                 # ── Batched execution for multiple independent non-terminal agents ──
                 upstream_prefixes = []
                 for j in nonterminal_in_level:
