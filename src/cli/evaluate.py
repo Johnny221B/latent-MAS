@@ -1472,6 +1472,12 @@ def _gpu_worker(
 
     result_queue.put(None)  # signal done
 
+    # Explicit cleanup to ensure process exits
+    del system
+    torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
 
 def evaluate(
     config_path: str,
@@ -1686,7 +1692,12 @@ def evaluate(
     progress.close()
 
     for p in workers:
-        p.join()
+        p.join(timeout=60)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=10)
+        if p.is_alive():
+            p.kill()
 
     # ── Summary ──
     t_total = time.time() - t_start
