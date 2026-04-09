@@ -279,18 +279,18 @@ class DAGExecutor:
             reasoning_steps = agents[agent_indices[0]].reasoning_steps
             compress_last_k = agents[agent_indices[0]].compress_last_k
 
-            # Single batched latent_reasoning call
-            with torch.no_grad():
-                output = agents[agent_indices[0]].base_model.latent_reasoning(
-                    input_ids=batched_input_ids,
-                    attention_mask=batched_attention_mask,
-                    prefix_embeds=batched_prefix_embeds if not use_kv else None,
-                    past_key_values=batched_prefix_kv if use_kv else None,
-                    num_latent_steps=reasoning_steps,
-                )
+            # Single batched latent_reasoning call — no no_grad so task loss
+            # gradients can flow through the full DAG
+            output = agents[agent_indices[0]].base_model.latent_reasoning(
+                input_ids=batched_input_ids,
+                attention_mask=batched_attention_mask,
+                prefix_embeds=batched_prefix_embeds if not use_kv else None,
+                past_key_values=batched_prefix_kv if use_kv else None,
+                num_latent_steps=reasoning_steps,
+            )
             del batched_prefix_kv
 
-            trajectory = output["hidden_trajectory"].detach()  # [num_agents*B, m, D]
+            trajectory = output["hidden_trajectory"]  # [num_agents*B, m, D]
 
             # Split back per agent
             k = min(compress_last_k, trajectory.shape[1])

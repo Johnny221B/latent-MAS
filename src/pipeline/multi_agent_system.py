@@ -118,6 +118,14 @@ class MultiAgentSystem(nn.Module):
         if config.get("training", {}).get("train_strategy") == "full_finetune":
             self.base_model.set_trainable(True)
 
+        # Enable gradient checkpointing for E2E gradient flow through frozen model
+        if config.get("training", {}).get("e2e_gradient", False):
+            if self._base_models is not None:
+                for model_wrapper in self._base_models.values():
+                    model_wrapper.enable_gradient_checkpointing()
+            else:
+                self.base_model.enable_gradient_checkpointing()
+
         # Canonical hidden_dim = primary (terminal) model's dimension
         hidden_dim = self.base_model.hidden_dim
 

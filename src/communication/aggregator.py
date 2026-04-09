@@ -82,6 +82,9 @@ class MessageAggregator:
     ) -> torch.Tensor | None:
         """Concatenate incoming prefixes along the sequence dimension.
 
+        Each prefix is scaled by its adjacency weight before concatenation,
+        so gradients from task_loss can flow back to adjacency logits.
+
         Output shape: [B, num_incoming * Lp, D]
         """
         j = agent_index
@@ -92,9 +95,11 @@ class MessageAggregator:
                 continue
             if prefix is None:
                 continue
-            if float(adjacency[i, j].detach().item()) < self.concat_threshold:
+            weight = adjacency[i, j]
+            if float(weight.detach().item()) < self.concat_threshold:
                 continue
-            incoming_prefixes.append(prefix)
+            # Scale prefix by adjacency weight to preserve gradient flow
+            incoming_prefixes.append(weight * prefix)
 
         if not incoming_prefixes:
             return None
