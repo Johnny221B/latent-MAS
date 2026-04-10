@@ -262,11 +262,13 @@ class MultiAgentSystem(nn.Module):
         # ── Trainable: Adjacency ──
         graph_init_scale = float(config.get("graph", {}).get("init_scale", 6.0))
         graph_fixed_structure = bool(config.get("graph", {}).get("fixed_structure", False))
+        graph_noise_scale = float(config.get("graph", {}).get("noise_scale", 0.0))
         self.adjacency = LearnableAdjacency(
             prior=prior,
             allowed_edges_mask=allowed_edges_mask,
             init_scale=graph_init_scale,
             fixed_structure=graph_fixed_structure,
+            noise_scale=graph_noise_scale,
         )
         self.freeze_topology = bool(config.get("graph", {}).get("freeze_topology", False))
         if self.freeze_topology:

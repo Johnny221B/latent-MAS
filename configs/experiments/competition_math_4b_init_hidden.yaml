@@ -11,6 +11,7 @@ graph:
   freeze_topology: false
   aggregation_mode: "concat"
   roles_dir: "configs/roles"
+  noise_scale: 0.3
 
 compressor:
   num_queries: 16
