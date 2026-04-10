@@ -1,10 +1,20 @@
 """ARC dataset helpers and config."""
 
+import json
+from pathlib import Path
 
-def _load_hf_dataset(dataset_name: str, subset: str | None, split: str):
+LOCAL_DATA_DIR = Path("/mnt/3fs/data/yfzhang/cache/local_datasets")
+
+
+def _load_arc(subset_tag: str, split: str):
+    """Load ARC from local JSON, fall back to HuggingFace."""
+    local_path = LOCAL_DATA_DIR / f"{subset_tag}_{split}.json"
+    if local_path.exists():
+        with open(local_path) as f:
+            return json.load(f)
     from datasets import load_dataset
-
-    return load_dataset(dataset_name, subset, split=split)
+    hf_subset = "ARC-Easy" if "easy" in subset_tag else "ARC-Challenge"
+    return load_dataset("allenai/ai2_arc", hf_subset, split=split)
 
 
 def _iter_arc_choices(raw_choices) -> list[tuple[str, str]]:
@@ -53,7 +63,7 @@ def _extract_arc_answer(answer_key: str) -> str:
 def build_task_configs() -> dict:
     return {
         "arc_easy": {
-            "loader": lambda split: _load_hf_dataset("allenai/ai2_arc", "ARC-Easy", split),
+            "loader": lambda split: _load_arc("arc_easy", split),
             "question_id_field": "id",
             "question_field": "question",
             "question_formatter": _format_arc_question,
@@ -61,7 +71,7 @@ def build_task_configs() -> dict:
             "answer_extractor": _extract_arc_answer,
         },
         "arc_challenge": {
-            "loader": lambda split: _load_hf_dataset("allenai/ai2_arc", "ARC-Challenge", split),
+            "loader": lambda split: _load_arc("arc_challenge", split),
             "question_id_field": "id",
             "question_field": "question",
             "question_formatter": _format_arc_question,

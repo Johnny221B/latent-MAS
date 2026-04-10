@@ -1497,6 +1497,8 @@ def evaluate(
     eval_config_path: str | None = None,
     model_dtype: str | None = None,
     num_gpus: int | None = None,
+    resume: bool = False,
+    no_thinking: bool = False,
 ):
     import torch.multiprocessing as mp
 
@@ -1519,6 +1521,8 @@ def evaluate(
         max_samples = evaluation_cfg.get("max_samples")
     if model_dtype is not None:
         config.setdefault("model", {})["dtype"] = model_dtype
+    if no_thinking:
+        config.setdefault("model", {})["enable_thinking"] = False
 
     task = config["training"]["task"]
     checkpoint_dir = Path(output_dir) if output_dir is not None else Path(checkpoint_path).parent
@@ -1533,11 +1537,28 @@ def evaluate(
         print(f"Loading {task} {split} set...")
         full_dataset = create_dataset(task=task, split=split, max_samples=max_samples)
 
+    # Resume: read existing results and skip already-done samples
+    existing_samples = []
+    if resume:
+        eval_stem = "eval_results" if split == "test" else f"eval_results_{split}"
+        _eval_path = checkpoint_dir / f"{eval_stem}.json"
+        if _eval_path.exists():
+            try:
+                with open(_eval_path) as _f:
+                    _existing_data = json.load(_f)
+                existing_samples = _existing_data.get("samples", [])
+                done_qids = {s["question_id"] for s in existing_samples}
+                full_dataset = [full_dataset[j] for j in range(len(full_dataset)) if full_dataset[j]["question_id"] not in done_qids]
+                print(f"Resume: {len(existing_samples)} samples already done, {len(full_dataset)} remaining")
+            except Exception as _e:
+                print(f"Resume: could not read existing results ({_e}), starting fresh")
+                existing_samples = []
+
     # Determine GPU count
     available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     if num_gpus is None:
         num_gpus = available_gpus
-    num_gpus = min(num_gpus, available_gpus, len(full_dataset))
+    num_gpus = min(num_gpus, available_gpus, max(len(full_dataset), 1))
 
     print(f"Total samples: {len(full_dataset)}")
     print(f"GPUs: {num_gpus}")
@@ -1569,11 +1590,12 @@ def evaluate(
     eval_path = checkpoint_dir / f"{eval_stem}.json"
     agent_log_path = checkpoint_dir / f"{agent_log_stem}.json"
     role_agent_log_dir = checkpoint_dir / "agent_log"
-    for path in (eval_path, agent_log_path):
-        if path.exists():
-            path.unlink()
-    if role_agent_log_dir.exists():
-        shutil.rmtree(role_agent_log_dir)
+    if not (resume and existing_samples):
+        for path in (eval_path, agent_log_path):
+            if path.exists():
+                path.unlink()
+        if role_agent_log_dir.exists():
+            shutil.rmtree(role_agent_log_dir)
 
     params = {
         "config_path": config_path,
@@ -1614,17 +1636,24 @@ def evaluate(
     # Collect results from all workers
     print("Running evaluation...")
     t_start = time.time()
-    progress = tqdm(total=len(full_dataset), desc=f"Eval {task}", dynamic_ncols=True)
+    total_expected = len(full_dataset) + len(existing_samples)
+    progress = tqdm(total=total_expected, desc=f"Eval {task}", dynamic_ncols=True)
 
-    correct = 0
-    total = 0
-    valid = 0
-    valid_correct = 0
-    results = []
+    # Pre-populate with already-done results when resuming
+    correct = sum(1 for s in existing_samples if s["correct"])
+    total = len(existing_samples)
+    valid = sum(1 for s in existing_samples if not s.get("truncated", False))
+    valid_correct = sum(1 for s in existing_samples if s["correct"] and not s.get("truncated", False))
+    results = list(existing_samples)
     agent_log_results = []
     sample_durations = []
     generated_token_counts = []
     done_count = 0
+    if existing_samples:
+        progress.n = total
+        acc = correct / total * 100 if total > 0 else 0.0
+        progress.set_postfix(acc=f"{acc:.1f}%", correct=f"{correct}/{total}")
+        progress.refresh()
 
     while done_count < num_gpus:
         item = result_queue.get()
@@ -1761,6 +1790,8 @@ if __name__ == "__main__":
     parser.add_argument("--worker", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-gpus", type=int, default=None, help="Number of GPUs (default: all available)")
+    parser.add_argument("--resume", action="store_true", help="Resume from existing eval_results.json, skipping already-done samples")
+    parser.add_argument("--no-thinking", action="store_true", help="Disable thinking mode (sets model.enable_thinking=False)")
     args = parser.parse_args()
     evaluate(
         args.config,
@@ -1780,4 +1811,6 @@ if __name__ == "__main__":
         eval_config_path=args.eval_config,
         model_dtype=args.dtype,
         num_gpus=args.num_gpus,
+        resume=args.resume,
+        no_thinking=args.no_thinking,
     )
