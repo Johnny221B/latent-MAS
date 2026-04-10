@@ -1377,6 +1377,15 @@ def _build_and_load_system(config, checkpoint_path, device):
                 cleaned_state[new_key] = v
             system.compressor.load_state_dict(cleaned_state)
         system.adjacency.load_state_dict(ckpt["adjacency_state"])
+        # ── Load prefix projector state ──
+        pp_state = ckpt.get("prefix_projector_state")
+        if pp_state is not None:
+            if system.prefix_projectors is not None and isinstance(pp_state, dict):
+                for key, state in pp_state.items():
+                    if key in system.prefix_projectors:
+                        system.prefix_projectors[key].load_state_dict(state)
+            elif system.prefix_projector is not None:
+                system.prefix_projector.load_state_dict(pp_state)
     system.to(device)
     system.eval()
     return system

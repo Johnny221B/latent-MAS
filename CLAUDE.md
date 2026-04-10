@@ -23,8 +23,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 ### Training
 ```bash
-bash scripts/train.sh                                              # default (2 GPU)
-NPROC_PER_NODE=2 bash scripts/train.sh --config configs/experiments/gsm8k_5agent.yaml
+bash scripts/train.sh --config configs/experiments/gsm8k_5agent.yaml
 ```
 Training uses `torchrun` → `src/cli/train.py`. Output goes to `outputs/<timestamp>/`.
 
@@ -33,14 +32,6 @@ Training uses `torchrun` → `src/cli/train.py`. Output goes to `outputs/<timest
 CKPT_FOLDER=outputs/<checkpoint_dir> bash scripts/evaluate.sh     # ours
 bash scripts/eval_single.sh                                        # single-model baseline (vLLM)
 bash scripts/eval_paper.sh                                         # paper LatentMAS baseline
-```
-
-### Tests
-```bash
-pytest tests/                          # all tests
-pytest tests/test_e2e.py -v           # end-to-end training
-pytest tests/test_train.py            # training loop
-pytest tests/test_evaluate_streaming.py  # eval pipeline
 ```
 
 ### SLURM
@@ -113,11 +104,6 @@ model:
 ```
 
 ### Training Optimizations
-```yaml
-training:
-  use_amp: true          # mixed precision (bf16 autocast), ~2x speedup
-  warmup_steps: 100      # linear warmup + cosine decay (0 = disabled)
-```
 
 ## Environment & Debugging
 

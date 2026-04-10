@@ -83,10 +83,18 @@ def _load_local_train_split(split: str, source: str | None = None):
             f"{train_path}. Run scripts/prepare_am_deepseek_r1_distilled.py first."
         )
 
+    # Fast path: if source is a single name and a pre-filtered file exists, use it directly
+    if source is not None:
+        sources = {s.strip() for s in source.split(",")}
+        if len(sources) == 1:
+            prefiltered = LOCAL_DATA_DIR / f"{next(iter(sources))}.jsonl"
+            if prefiltered.exists():
+                print(f"Using pre-filtered file: {prefiltered}")
+                return _LocalJsonlDataset(prefiltered)
+
     dataset = _LocalJsonlDataset(train_path)
 
     if source is not None:
-        sources = {s.strip() for s in source.split(",")}
         filtered_indices = []
         for i in range(len(dataset)):
             row = dataset[i]
