@@ -233,14 +233,31 @@ class MultiAgentSystem(nn.Module):
             self.prefix_projector = None  # use per-model projectors instead
         else:
             hf_config = self.base_model.model.config
-            self.prefix_projector = PrefixProjector(
-                num_layers=hf_config.num_hidden_layers,
-                hidden_dim=hf_config.hidden_size,
-                num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
-                head_dim=_get_kv_head_dim(hf_config),
-                cache_config=hf_config,
-            )
-            self.prefix_projectors = None
+            per_agent_pp = compressor_cfg.get("per_agent_pp", False)
+            if per_agent_pp:
+                # One PP per agent breaks gradient symmetry when multiple agents
+                # receive from the same upstream (e.g. planner→analyst/critic/verifier).
+                # Keys are str(agent_index); dag_executor looks them up via agent_model_keys.
+                self.prefix_projectors = nn.ModuleDict()
+                for i in range(self.n_agents):
+                    self.prefix_projectors[str(i)] = PrefixProjector(
+                        num_layers=hf_config.num_hidden_layers,
+                        hidden_dim=hf_config.hidden_size,
+                        num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
+                        head_dim=_get_kv_head_dim(hf_config),
+                        cache_config=hf_config,
+                    )
+                self.prefix_projector = None
+                self._agent_model_keys = [str(i) for i in range(self.n_agents)]
+            else:
+                self.prefix_projector = PrefixProjector(
+                    num_layers=hf_config.num_hidden_layers,
+                    hidden_dim=hf_config.hidden_size,
+                    num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
+                    head_dim=_get_kv_head_dim(hf_config),
+                    cache_config=hf_config,
+                )
+                self.prefix_projectors = None
 
         # ── Trainable: Adjacency ──
         graph_init_scale = float(config.get("graph", {}).get("init_scale", 6.0))
