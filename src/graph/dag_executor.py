@@ -300,14 +300,26 @@ class DAGExecutor:
             del batched_prefix_kv
 
             trajectory = output["hidden_trajectory"]  # [num_agents*B, m, D]
+            initial_hidden_all = output.get("initial_hidden")  # [num_agents*B, input_seq_len, D] or None
 
             # Split back per agent
             k = min(compress_last_k, trajectory.shape[1])
             for idx, j in enumerate(agent_indices):
                 agent_traj = trajectory[idx * B : (idx + 1) * B]  # [B, m, D]
                 traj_to_compress = agent_traj[:, -k:, :]
-                mask_j = torch.ones(B, k, device=trajectory.device)
-                S_j = project_hidden(j, traj_to_compress)
+
+                # Prepend initial encoding hidden states if available
+                if initial_hidden_all is not None:
+                    agent_initial = initial_hidden_all[idx * B : (idx + 1) * B]  # [B, seq_len, D]
+                    agent_initial = agent_initial.to(dtype=traj_to_compress.dtype)
+                    to_compress = torch.cat([agent_initial, traj_to_compress], dim=1)
+                    initial_mask = torch.ones(B, agent_initial.shape[1], device=trajectory.device)
+                    mask_j = torch.cat([initial_mask, torch.ones(B, k, device=trajectory.device)], dim=1)
+                else:
+                    to_compress = traj_to_compress
+                    mask_j = torch.ones(B, k, device=trajectory.device)
+
+                S_j = project_hidden(j, to_compress)
                 P_j = get_compressor_for(j)(S_j, mask=mask_j)
                 all_prefixes[j] = P_j
                 if collect_agent_logs:

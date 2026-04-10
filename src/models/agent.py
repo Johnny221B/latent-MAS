@@ -326,10 +326,21 @@ class Agent:
         # Only compress the last k hidden states
         k = min(self.compress_last_k, m)
         trajectory_to_compress = trajectory[:, -k:, :]
-        compressor_mask = torch.ones(B, k, device=trajectory.device)
+
+        # Prepend initial encoding hidden states so the compressor has rich context
+        # instead of just k=2 latent reasoning steps (which are degenerate with so few steps)
+        initial_hidden = output.get("initial_hidden")  # [B, input_seq_len, D] or None
+        if initial_hidden is not None:
+            initial_hidden = initial_hidden.to(dtype=trajectory_to_compress.dtype)
+            to_compress = torch.cat([initial_hidden, trajectory_to_compress], dim=1)
+            initial_mask = torch.ones(B, initial_hidden.shape[1], device=trajectory.device)
+            compressor_mask = torch.cat([initial_mask, torch.ones(B, k, device=trajectory.device)], dim=1)
+        else:
+            to_compress = trajectory_to_compress
+            compressor_mask = torch.ones(B, k, device=trajectory.device)
 
         return {
-            "hidden_trajectory": trajectory_to_compress,
+            "hidden_trajectory": to_compress,
             "compressor_mask": compressor_mask,
             "full_trajectory": trajectory,
             "prefix_len": output["prefix_len"],

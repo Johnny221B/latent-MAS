@@ -577,6 +577,15 @@ class BaseModelWrapper(nn.Module):
         past_kv = raw["past_key_values"]
         last_hidden = raw["hidden_states"][-1][:, -1, :]  # [B, D]
 
+        # Save full hidden states from initial encoding for the compressor.
+        # KV cache path: prefix is in the cache, so output hidden states cover
+        # only input_ids positions — take them as-is.
+        # Embedding path: prefix is prepended to inputs_embeds, so slice it off.
+        if past_key_values is not None:
+            initial_hidden = raw["hidden_states"][-1]          # [B, input_len, D]
+        else:
+            initial_hidden = raw["hidden_states"][-1][:, prefix_len:, :]  # [B, input_len, D]
+
         # ── Step 2: Latent reasoning loop ──
         hidden_trajectory = []
         # Determine which steps need gradient
@@ -632,6 +641,7 @@ class BaseModelWrapper(nn.Module):
 
         return {
             "hidden_trajectory": hidden_trajectory,
+            "initial_hidden": initial_hidden,
             "prefix_len": prefix_len,
         }
 
