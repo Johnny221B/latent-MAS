@@ -1276,14 +1276,35 @@ def evaluate(
             system.base_model.model.load_state_dict(base_model_state)
 
         # Handle DDP-wrapped state dict (keys may have "module." prefix)
-        comp_state = ckpt["compressor_state"]
-        cleaned_state = {}
-        for k, v in comp_state.items():
-            new_key = k.replace("module.", "") if k.startswith("module.") else k
-            cleaned_state[new_key] = v
-        system.compressor.load_state_dict(cleaned_state)
+        comp_state = ckpt.get("compressor_state")
+        if comp_state is not None:
+            if isinstance(comp_state, list):
+                for i, state in enumerate(comp_state):
+                    cleaned = {k.replace("module.", "") if k.startswith("module.") else k: v for k, v in state.items()}
+                    system.compressors[i].load_state_dict(cleaned)
+            else:
+                cleaned_state = {}
+                for k, v in comp_state.items():
+                    new_key = k.replace("module.", "") if k.startswith("module.") else k
+                    cleaned_state[new_key] = v
+                system.compressor.load_state_dict(cleaned_state)
 
         system.adjacency.load_state_dict(ckpt["adjacency_state"])
+
+        # ── Load prefix projector state ──
+        pp_state = ckpt.get("prefix_projector_state")
+        if pp_state is not None:
+            if system.prefix_projectors is not None and isinstance(pp_state, dict):
+                for key, state in pp_state.items():
+                    if key in system.prefix_projectors:
+                        system.prefix_projectors[key].load_state_dict(state)
+            elif system.prefix_projector is not None:
+                system.prefix_projector.load_state_dict(pp_state)
+
+        # ── Load learnable prefix embeddings (pure_prefix mode) ──
+        lp_state = ckpt.get("learnable_prefix_state")
+        if lp_state is not None and system.learnable_prefix_embeddings is not None:
+            system.learnable_prefix_embeddings.load_state_dict(lp_state)
     else:
         if is_main_process(rank):
             print("No checkpoint provided — using random-initialized compressor/adjacency.")

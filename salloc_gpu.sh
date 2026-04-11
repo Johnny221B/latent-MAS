@@ -6,9 +6,7 @@ salloc -p hpg-b200 \
   --gpus=2 \
   --time=24:00:00 \
   --cpus-per-task=4 \
-  --mem=256G \
-  --mail-type=ALL \
-  --mail-user=jingxwu@unc.edu \
-  --job-name=toby-test
+  --mem=256GB \
+  --job-name=dev
   
 srun --pty -u bash -i

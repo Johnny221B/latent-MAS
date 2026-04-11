@@ -1,0 +1,68 @@
+compressor:
+  dropout: 0.1
+  num_heads: 8
+  num_layers: 1
+  num_queries: 16
+evaluation:
+  batch_size: 4
+  max_new_tokens: 8192
+  run_after_train: true
+  splits_after_train:
+  - test
+  test_probe_samples: -1
+graph:
+  config: configs/graphs/hierarchical_6agent.json
+  init_scale: 0.0
+  roles_dir: configs/roles
+model:
+  dtype: bfloat16
+  enable_thinking: true
+  frozen: true
+  name: /home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+output:
+  dir: outputs/dev/hierarchical_6a_4b_e2e
+  log_dir: logs
+reasoning:
+  compress_last_k: 25
+  steps_per_agent: 25
+report:
+  env_file: .env
+  key_env: WANDB_API_KEY
+  mode: online
+  project: latent-mas
+  use_wandb: true
+training:
+  adjacency_lr: 0.1
+  batch_size: 4
+  e2e_gradient: true
+  epochs: 4
+  gradient_accumulation_steps: 2
+  input_mode: chat_with_prefix
+  lambda_concentrate: 0.02
+  lambda_sparse: 0.001
+  lambda_struct: 0.0
+  log_interval: 1
+  lr: 1.0e-06
+  max_seq_len: 8192
+  resume_from_checkpoint: null
+  save_final_checkpoint: true
+  save_interval: 5000
+  seed: 42
+  shuffle: true
+  task: competition_math
+  train_base_model: false
+  train_strategy: communication_only
+  use_amp: true
+  w_add: 1.0
+  w_drop: 3.0
+  weight_decay: 0.01
+training_probe:
+  batch_size: 1
+  degenerate_max_new_tokens_ratio: 0.5
+  enabled: false
+  every_n_steps: 0
+  max_new_tokens: 64
+  samples: 100
+  seed: 42
+  write_agent_logs: false
+  write_predictions_json: false
