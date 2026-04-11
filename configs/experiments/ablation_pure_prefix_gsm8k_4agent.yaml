@@ -1,0 +1,52 @@
+model:
+  name: "/home/chengzhi.ucsb/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c"
+  frozen: true
+
+graph:
+  config: "configs/graphs/chain_4agent.json"
+  roles_dir: "configs/roles/text"
+  freeze_topology: true          # topology fixed; adjacency only routes text
+
+# Communication mode: pure_prefix
+# Each agent has its own learnable embedding → PrefixProjector → KV cache prefix.
+# Upstream agents pass TEXT to downstream (text-space communication).
+# The prefix does NOT carry any cross-agent information — pure prefix tuning baseline.
+communication:
+  mode: "pure_prefix"
+
+compressor:
+  num_queries: 8                 # Lp=8, same as latent method
+  num_heads: 8
+  dropout: 0.1
+  num_layers: 1
+
+training:
+  task: "gsm8k"
+  input_mode: "chat_with_prefix"
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
+  batch_size: 4
+  lr: 0.0005
+  weight_decay: 0.01
+  epochs: 2
+  max_seq_len: 4096
+  lambda_add: 0.0
+  lambda_drop: 0.000
+  lambda_sparse: 0.000
+  gradient_accumulation_steps: 2
+  log_interval: 1
+  save_interval: 1000
+
+reasoning:
+  steps_per_agent: 40
+  compress_last_k: 40
+
+output:
+  dir: "outputs/ablation_pure_prefix_gsm8k_4agent"
+  log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

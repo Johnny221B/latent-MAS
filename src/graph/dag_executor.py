@@ -89,6 +89,9 @@ class DAGExecutor:
         prefix_projectors: dict[str, PrefixProjector] | None = None,
         agent_model_keys: list[str] | None = None,
         e2e_gradient: bool = False,
+        # Ablation: pure_prefix mode
+        communication_mode: str = "latent",
+        learnable_prefix_embeddings: list[torch.Tensor] | None = None,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -115,18 +118,49 @@ class DAGExecutor:
             raise ValueError("terminal agent must be the last node in execution_order")
 
         all_prefixes = [None] * n
-        all_text_outputs = [None] * n
+        all_text_outputs = [None] * n  # In pure_prefix mode: list[str] per agent (length B)
         agent_logs = []
 
         def collect_upstream_texts(agent_index: int) -> list[str]:
+            """Collect upstream text strings for inference (single-item)."""
             texts = []
             for upstream_idx in range(n):
                 message = all_text_outputs[upstream_idx]
                 if message is None:
                     continue
                 if float(adjacency[upstream_idx, agent_index].detach().item()) > 0.5:
-                    texts.append(message)
+                    if isinstance(message, list):
+                        texts.append(message[0])
+                    else:
+                        texts.append(message)
             return texts
+
+        def collect_upstream_texts_batched(agent_index: int, B: int) -> list[list[str]]:
+            """Collect upstream text strings for batched training: returns [B x num_upstream_texts].
+
+            In pure_prefix mode: collect ALL prior agents' texts (in execution order),
+            so every downstream agent sees the full upstream reasoning chain.
+            In other modes: filter by adjacency > 0.5.
+            """
+            upstream_texts_batch = [[] for _ in range(B)]
+            for upstream_idx in execution_order:
+                if upstream_idx == agent_index:
+                    break  # only collect agents that run before this one
+                message = all_text_outputs[upstream_idx]
+                if message is None:
+                    continue
+                include = (
+                    communication_mode == "pure_prefix"
+                    or float(adjacency[upstream_idx, agent_index].detach().item()) > 0.5
+                )
+                if include:
+                    if isinstance(message, list):
+                        for b in range(B):
+                            upstream_texts_batch[b].append(message[b] if b < len(message) else message[0])
+                    else:
+                        for b in range(B):
+                            upstream_texts_batch[b].append(message)
+            return upstream_texts_batch
 
         def get_prefix_projector_for(agent_index: int) -> PrefixProjector | None:
             """Resolve the correct PrefixProjector for a given agent."""
@@ -166,6 +200,38 @@ class DAGExecutor:
 
         def _execute_single_nonterminal(j, upstream_prefix):
             """Execute a single non-terminal agent (original sequential path)."""
+            # ── pure_prefix ablation: own prefix + text communication ──
+            if communication_mode == "pure_prefix":
+                B = task_token_ids.shape[0]
+                own_emb = learnable_prefix_embeddings[j].expand(B, -1, -1)
+                own_pp = get_prefix_projector_for(j)
+                own_prefix_kv = own_pp(own_emb, target_dtype=agents[j].base_model.dtype) if own_pp is not None else None
+                upstream_texts_batch = collect_upstream_texts_batched(j, B)
+                text_output = agents[j].generate_answer(
+                    task_token_ids=task_token_ids,
+                    task_attention_mask=task_attention_mask,
+                    upstream_prefix_kv=own_prefix_kv,
+                    upstream_texts=upstream_texts_batch,
+                    max_new_tokens=max_new_tokens,
+                    inference_mode="chat_with_text",
+                    use_upstream_prefix=True,
+                    do_sample=do_sample,
+                    return_metadata=True,
+                )
+                generated = text_output["generated_text"]
+                # Store per-batch-item texts
+                all_text_outputs[j] = generated if isinstance(generated, list) else [generated] * B
+                if collect_agent_logs:
+                    agent_logs.append({
+                        "agent_id": agents[j].agent_id,
+                        "role_name": agents[j].role_name,
+                        "output_type": "pure_prefix_text",
+                        "system_prompt": agents[j].system_prompt,
+                        "received_upstream_texts": bool(any(upstream_texts_batch)),
+                        "generated_text": generated,
+                    })
+                return
+
             if not training and inference_mode == "chat_with_text":
                 upstream_texts = collect_upstream_texts(j)
                 text_output = agents[j].generate_answer(
@@ -339,7 +405,7 @@ class DAGExecutor:
             nonterminal_in_level = [j for j in level if j != terminal_index]
             terminal_in_level = [j for j in level if j == terminal_index]
 
-            if len(nonterminal_in_level) > 1 and training and not e2e_gradient:
+            if len(nonterminal_in_level) > 1 and training and not e2e_gradient and communication_mode == "latent":
                 # ── Batched execution for multiple independent non-terminal agents ──
                 upstream_prefixes = []
                 for j in nonterminal_in_level:
@@ -358,6 +424,45 @@ class DAGExecutor:
 
             # ── Handle terminal agent if in this level ──
             for j in terminal_in_level:
+                # ── pure_prefix ablation: own prefix + upstream text ──
+                if communication_mode == "pure_prefix":
+                    B = task_token_ids.shape[0]
+                    own_emb = learnable_prefix_embeddings[j].expand(B, -1, -1)
+                    terminal_pp = get_prefix_projector_for(j)
+                    own_prefix_kv = terminal_pp(own_emb, target_dtype=agents[j].base_model.dtype) if terminal_pp is not None else None
+                    upstream_texts_batch = collect_upstream_texts_batched(j, B)
+                    if training:
+                        terminal_output = agents[j].forward_for_loss(
+                            task_token_ids=task_token_ids,
+                            task_attention_mask=task_attention_mask,
+                            upstream_prefix_kv=own_prefix_kv,
+                            answer_ids=answer_ids,
+                            answer_mask=answer_mask,
+                            input_mode="chat_with_text",
+                            upstream_texts=upstream_texts_batch,
+                        )
+                    else:
+                        generation = agents[j].generate_answer(
+                            task_token_ids=task_token_ids,
+                            task_attention_mask=task_attention_mask,
+                            upstream_prefix_kv=own_prefix_kv,
+                            upstream_texts=upstream_texts_batch,
+                            max_new_tokens=max_new_tokens,
+                            inference_mode="chat_with_text",
+                            use_upstream_prefix=True,
+                            do_sample=do_sample,
+                            return_metadata=True,
+                        )
+                        if collect_agent_logs:
+                            agent_logs.append({
+                                "agent_id": agents[j].agent_id,
+                                "role_name": agents[j].role_name,
+                                "output_type": "text",
+                                "generated_text": generation["generated_text"],
+                                "generation": generation,
+                            })
+                    continue
+
                 upstream_prefix = self.aggregator.aggregate(
                     agent_index=j, adjacency=adjacency, all_prefixes=all_prefixes,
                 )

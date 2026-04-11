@@ -208,7 +208,14 @@ class MultiAgentSystem(nn.Module):
                 target_norm=target_norm,
             )
 
-        if per_agent_compressor:
+        # ── Communication mode (latent vs pure_prefix ablation) ──
+        self.communication_mode = config.get("communication", {}).get("mode", "latent")
+
+        if self.communication_mode == "pure_prefix":
+            # No compressor needed: prefix comes from per-agent learnable embeddings
+            self.compressor = None
+            self.compressors = None
+        elif per_agent_compressor:
             # Each non-terminal agent gets its own compressor
             self.compressors = nn.ModuleList([_make_compressor() for _ in range(self.n_agents)])
             self.compressor = None  # not used
@@ -259,6 +266,16 @@ class MultiAgentSystem(nn.Module):
                 )
                 self.prefix_projectors = None
 
+        # ── Trainable: per-agent learnable prefix embeddings (pure_prefix mode only) ──
+        if self.communication_mode == "pure_prefix":
+            Lp = compressor_cfg.get("num_queries", 16)
+            self.learnable_prefix_embeddings = nn.ParameterList([
+                nn.Parameter(torch.randn(1, Lp, hidden_dim) * 0.02)
+                for _ in range(self.n_agents)
+            ])
+        else:
+            self.learnable_prefix_embeddings = None
+
         # ── Trainable: Adjacency ──
         graph_init_scale = float(config.get("graph", {}).get("init_scale", 6.0))
         graph_fixed_structure = bool(config.get("graph", {}).get("fixed_structure", False))
@@ -292,6 +309,8 @@ class MultiAgentSystem(nn.Module):
             if self.hidden_projections:
                 self.hidden_projections.to(dtype=model_dtype)
             self.adjacency.to(dtype=model_dtype)
+            if self.learnable_prefix_embeddings is not None:
+                self.learnable_prefix_embeddings.to(dtype=model_dtype)
 
         # ── Losses ──
         self.task_loss_fn = TaskLoss()  # "ce" or "reward"
@@ -344,6 +363,8 @@ class MultiAgentSystem(nn.Module):
             prefix_projectors=self.prefix_projectors,
             agent_model_keys=self._agent_model_keys,
             e2e_gradient=bool(self.config.get("training", {}).get("e2e_gradient", False)),
+            communication_mode=self.communication_mode,
+            learnable_prefix_embeddings=list(self.learnable_prefix_embeddings) if self.learnable_prefix_embeddings is not None else None,
         )
 
         result = {"adjacency": A}
@@ -402,6 +423,8 @@ class MultiAgentSystem(nn.Module):
             params.extend(self.compressors.parameters())
         elif self.compressor is not None:
             params.extend(self.compressor.parameters())
+        if self.learnable_prefix_embeddings is not None:
+            params.extend(self.learnable_prefix_embeddings.parameters())
         if not self.freeze_topology:
             params.extend(self.adjacency.parameters())
         # Hidden projections (heterogeneous model alignment)

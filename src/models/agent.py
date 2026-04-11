@@ -366,6 +366,7 @@ class Agent:
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
         input_mode: str = "legacy_plain_with_prefix",
+        upstream_texts: list[list[str]] | None = None,
     ) -> dict:
         if input_mode == "legacy_plain_with_prefix":
             role_ids = self._get_role_token_ids().expand(task_token_ids.shape[0], -1)
@@ -388,12 +389,14 @@ class Agent:
             prompt_len = task_token_ids.shape[1]
             logits_start = role_len
         else:
-            if input_mode != "chat_with_prefix":
+            if input_mode not in {"chat_with_prefix", "chat_with_text"}:
                 raise ValueError(f"Unsupported input_mode: {input_mode}")
+            _inference_mode = "chat_with_text" if input_mode == "chat_with_text" else "chat_with_prefix"
             prompt_ids, prompt_mask = self._build_generation_inputs(
                 task_token_ids=task_token_ids,
                 task_attention_mask=task_attention_mask,
-                inference_mode="chat_with_prefix",
+                inference_mode=_inference_mode,
+                upstream_texts=upstream_texts if input_mode == "chat_with_text" else None,
             )
             if answer_ids is not None:
                 input_ids = torch.cat([prompt_ids, answer_ids], dim=1)

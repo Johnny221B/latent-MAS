@@ -434,6 +434,7 @@ def load_training_checkpoint(
     grad_accum_steps: int = 1,
     base_model_module=None,
     trainable_base_model: bool = False,
+    learnable_prefix_module=None,
 ) -> dict:
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -445,15 +446,22 @@ def load_training_checkpoint(
     compressor_state = checkpoint.get("compressor_state")
     adjacency_state = checkpoint.get("adjacency_state")
     optimizer_state = checkpoint.get("optimizer_state")
-    if compressor_state is None or adjacency_state is None or optimizer_state is None:
+    if adjacency_state is None or optimizer_state is None:
         raise ValueError(
             "Resume checkpoint is missing one of the required training states: "
-            "compressor_state, adjacency_state, optimizer_state"
+            "adjacency_state, optimizer_state"
         )
+    if compressor_state is None and compressor is not None:
+        raise ValueError("Resume checkpoint is missing compressor_state but compressor exists")
 
-    compressor.load_state_dict(compressor_state)
+    if compressor is not None and compressor_state is not None:
+        compressor.load_state_dict(compressor_state)
     adjacency.load_state_dict(adjacency_state)
     optimizer.load_state_dict(optimizer_state)
+
+    learnable_prefix_state = checkpoint.get("learnable_prefix_state")
+    if learnable_prefix_module is not None and learnable_prefix_state is not None:
+        learnable_prefix_module.load_state_dict(learnable_prefix_state)
 
     prefix_projector_state = checkpoint.get("prefix_projector_state")
     if prefix_projectors is not None and isinstance(prefix_projector_state, dict):
@@ -733,6 +741,8 @@ def train(config_path: str, max_samples: int | None = None):
         non_adj_params.extend(system.compressors.parameters())
     elif system.compressor is not None:
         non_adj_params.extend(system.compressor.parameters())
+    if system.learnable_prefix_embeddings is not None:
+        non_adj_params.extend(system.learnable_prefix_embeddings.parameters())
     if system.prefix_projectors is not None:
         non_adj_params.extend(system.prefix_projectors.parameters())
     elif system.prefix_projector is not None:
@@ -787,8 +797,10 @@ def train(config_path: str, max_samples: int | None = None):
         ]
         compressor = None  # not used for single compressor
     else:
-        compressor = system.compressor.module if is_ddp else system.compressor
+        compressor = (system.compressor.module if is_ddp else system.compressor) if system.compressor is not None else None
         compressor_modules = None
+    # Unwrap learnable_prefix_embeddings (not DDP-wrapped; gradients synced manually)
+    learnable_prefix_module = system.learnable_prefix_embeddings  # nn.ParameterList or None
     # Unwrap prefix_projector(s) for checkpoint save/load
     if system.prefix_projectors is not None:
         prefix_projector = None
@@ -820,6 +832,7 @@ def train(config_path: str, max_samples: int | None = None):
             grad_accum_steps=grad_accum_steps,
             base_model_module=base_model_module if trainable_base_model else None,
             trainable_base_model=trainable_base_model,
+            learnable_prefix_module=learnable_prefix_module,
         )
 
     # ── Output directory with timestamp or resume target ──
@@ -958,12 +971,22 @@ def train(config_path: str, max_samples: int | None = None):
                 # ── Sync adjacency gradients across GPUs (manual allreduce) ──
                 if is_ddp and not freeze_topology and adjacency.logits.grad is not None:
                     dist.all_reduce(adjacency.logits.grad, op=dist.ReduceOp.AVG)
+                # ── Sync learnable_prefix_embeddings gradients across GPUs ──
+                if is_ddp and learnable_prefix_module is not None:
+                    for emb in learnable_prefix_module:
+                        if emb.grad is not None:
+                            dist.all_reduce(emb.grad, op=dist.ReduceOp.AVG)
                 mem = torch.cuda.max_memory_allocated(device) / 1024**3
                 scaler.unscale_(optimizer)
                 # Compute grad norms AFTER unscale so they reflect true magnitudes
-                comp_grad = compute_grad_norm(
-                    [p for c in compressor_modules for p in c.parameters()]
-                ) if compressor_modules is not None else compute_grad_norm(compressor.parameters())
+                if compressor_modules is not None:
+                    comp_grad = compute_grad_norm([p for c in compressor_modules for p in c.parameters()])
+                elif compressor is not None:
+                    comp_grad = compute_grad_norm(compressor.parameters())
+                elif learnable_prefix_module is not None:
+                    comp_grad = compute_grad_norm(learnable_prefix_module.parameters())
+                else:
+                    comp_grad = 0.0
                 adj_grad = compute_grad_norm([adjacency.logits])
                 if prefix_projectors_unwrapped is not None:
                     proj_grad = compute_grad_norm(
@@ -1078,7 +1101,12 @@ def train(config_path: str, max_samples: int | None = None):
             if is_main_process() and (batch_idx + 1) % log_interval == 0:
                 display_comp_grad = comp_grad if comp_grad is not None else (
                     compute_grad_norm([p for c in compressor_modules for p in c.parameters()])
-                    if compressor_modules is not None else compute_grad_norm(compressor.parameters())
+                    if compressor_modules is not None
+                    else compute_grad_norm(compressor.parameters())
+                    if compressor is not None
+                    else compute_grad_norm(learnable_prefix_module.parameters())
+                    if learnable_prefix_module is not None
+                    else 0.0
                 )
                 if proj_grad is not None:
                     display_proj_grad = proj_grad
@@ -1156,7 +1184,12 @@ def train(config_path: str, max_samples: int | None = None):
                     "compressor_state": (
                         [c.state_dict() for c in compressor_modules]
                         if compressor_modules is not None
-                        else compressor.state_dict()
+                        else compressor.state_dict() if compressor is not None
+                        else None
+                    ),
+                    "learnable_prefix_state": (
+                        learnable_prefix_module.state_dict()
+                        if learnable_prefix_module is not None else None
                     ),                    "prefix_projector_state": (
                         {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
                         if prefix_projectors_unwrapped is not None
@@ -1253,7 +1286,12 @@ def train(config_path: str, max_samples: int | None = None):
                 "compressor_state": (
                     [c.state_dict() for c in compressor_modules]
                     if compressor_modules is not None
-                    else compressor.state_dict()
+                    else compressor.state_dict() if compressor is not None
+                    else None
+                ),
+                "learnable_prefix_state": (
+                    learnable_prefix_module.state_dict()
+                    if learnable_prefix_module is not None else None
                 ),
                 "prefix_projector_state": (
                     {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
