@@ -118,7 +118,7 @@ class MultiAgentSystem(nn.Module):
         if config.get("training", {}).get("train_strategy") == "full_finetune":
             self.base_model.set_trainable(True)
 
-        # Enable gradient checkpointing for end-to-end gradient flow
+        # Enable gradient checkpointing for E2E gradient flow through frozen model
         if config.get("training", {}).get("e2e_gradient", False):
             if self._base_models is not None:
                 for model_wrapper in self._base_models.values():
@@ -196,14 +196,32 @@ class MultiAgentSystem(nn.Module):
             target_norm = embed_weight.norm(dim=1).mean().item()
 
         compressor_cfg = config.get("compressor", {})
-        self.compressor = LatentCompressor(
-            hidden_dim=hidden_dim,
-            num_queries=compressor_cfg.get("num_queries", 16),
-            num_heads=compressor_cfg.get("num_heads", 8),
-            dropout=compressor_cfg.get("dropout", 0.1),
-            num_layers=compressor_cfg.get("num_layers", 1),
-            target_norm=target_norm,
-        )
+        per_agent_compressor = compressor_cfg.get("per_agent", False)
+
+        def _make_compressor():
+            return LatentCompressor(
+                hidden_dim=hidden_dim,
+                num_queries=compressor_cfg.get("num_queries", 16),
+                num_heads=compressor_cfg.get("num_heads", 8),
+                dropout=compressor_cfg.get("dropout", 0.1),
+                num_layers=compressor_cfg.get("num_layers", 1),
+                target_norm=target_norm,
+            )
+
+        # ── Communication mode (latent vs pure_prefix ablation) ──
+        self.communication_mode = config.get("communication", {}).get("mode", "latent")
+
+        if self.communication_mode == "pure_prefix":
+            # No compressor needed: prefix comes from per-agent learnable embeddings
+            self.compressor = None
+            self.compressors = None
+        elif per_agent_compressor:
+            # Each non-terminal agent gets its own compressor
+            self.compressors = nn.ModuleList([_make_compressor() for _ in range(self.n_agents)])
+            self.compressor = None  # not used
+        else:
+            self.compressor = _make_compressor()
+            self.compressors = None
 
         # ── Trainable: PrefixProjectors (per unique model architecture) ──
         # Each model type needs its own PrefixProjector because KV cache
@@ -222,25 +240,77 @@ class MultiAgentSystem(nn.Module):
             self.prefix_projector = None  # use per-model projectors instead
         else:
             hf_config = self.base_model.model.config
-            self.prefix_projector = PrefixProjector(
-                num_layers=hf_config.num_hidden_layers,
-                hidden_dim=hf_config.hidden_size,
-                num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
-                head_dim=_get_kv_head_dim(hf_config),
-                cache_config=hf_config,
-            )
-            self.prefix_projectors = None
+            per_agent_pp = compressor_cfg.get("per_agent_pp", False)
+            if per_agent_pp:
+                # One PP per agent breaks gradient symmetry when multiple agents
+                # receive from the same upstream (e.g. planner→analyst/critic/verifier).
+                # Keys are str(agent_index); dag_executor looks them up via agent_model_keys.
+                self.prefix_projectors = nn.ModuleDict()
+                for i in range(self.n_agents):
+                    self.prefix_projectors[str(i)] = PrefixProjector(
+                        num_layers=hf_config.num_hidden_layers,
+                        hidden_dim=hf_config.hidden_size,
+                        num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
+                        head_dim=_get_kv_head_dim(hf_config),
+                        cache_config=hf_config,
+                    )
+                self.prefix_projector = None
+                self._agent_model_keys = [str(i) for i in range(self.n_agents)]
+            else:
+                self.prefix_projector = PrefixProjector(
+                    num_layers=hf_config.num_hidden_layers,
+                    hidden_dim=hf_config.hidden_size,
+                    num_kv_heads=getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads),
+                    head_dim=_get_kv_head_dim(hf_config),
+                    cache_config=hf_config,
+                )
+                self.prefix_projectors = None
+
+        # ── Trainable: per-agent learnable prefix embeddings (pure_prefix mode only) ──
+        if self.communication_mode == "pure_prefix":
+            Lp = compressor_cfg.get("num_queries", 16)
+            self.learnable_prefix_embeddings = nn.ParameterList([
+                nn.Parameter(torch.randn(1, Lp, hidden_dim) * 0.02)
+                for _ in range(self.n_agents)
+            ])
+        else:
+            self.learnable_prefix_embeddings = None
 
         # ── Trainable: Adjacency ──
         graph_init_scale = float(config.get("graph", {}).get("init_scale", 6.0))
+        graph_fixed_structure = bool(config.get("graph", {}).get("fixed_structure", False))
+        graph_noise_scale = float(config.get("graph", {}).get("noise_scale", 0.0))
         self.adjacency = LearnableAdjacency(
             prior=prior,
             allowed_edges_mask=allowed_edges_mask,
             init_scale=graph_init_scale,
+            fixed_structure=graph_fixed_structure,
+            noise_scale=graph_noise_scale,
         )
+        self.freeze_topology = bool(config.get("graph", {}).get("freeze_topology", False))
+        if self.freeze_topology:
+            self.adjacency.logits.requires_grad_(False)
 
         # ── Executor (stateless) ──
-        self.executor = DAGExecutor(aggregator=MessageAggregator())
+        aggregation_mode = config.get("graph", {}).get("aggregation_mode", "weighted_sum")
+        self.executor = DAGExecutor(aggregator=MessageAggregator(mode=aggregation_mode))
+
+        # ── Cast trainable components to model dtype (bf16) ──
+        model_dtype = BaseModelWrapper._resolve_dtype(model_cfg.get("dtype"))
+        if model_dtype != torch.float32:
+            if self.compressors is not None:
+                self.compressors.to(dtype=model_dtype)
+            elif self.compressor is not None:
+                self.compressor.to(dtype=model_dtype)
+            if self.prefix_projectors is not None:
+                self.prefix_projectors.to(dtype=model_dtype)
+            elif self.prefix_projector is not None:
+                self.prefix_projector.to(dtype=model_dtype)
+            if self.hidden_projections:
+                self.hidden_projections.to(dtype=model_dtype)
+            self.adjacency.to(dtype=model_dtype)
+            if self.learnable_prefix_embeddings is not None:
+                self.learnable_prefix_embeddings.to(dtype=model_dtype)
 
         # ── Losses ──
         self.task_loss_fn = TaskLoss()  # "ce" or "reward"
@@ -272,6 +342,7 @@ class MultiAgentSystem(nn.Module):
             agents=self.agents,
             adjacency=A,
             compressor=self.compressor,
+            compressors=self.compressors,
             prefix_projector=self.prefix_projector,
             task_token_ids=task_token_ids,
             task_attention_mask=task_attention_mask,
@@ -291,6 +362,9 @@ class MultiAgentSystem(nn.Module):
             agent_projection_keys=self._agent_projection_keys,
             prefix_projectors=self.prefix_projectors,
             agent_model_keys=self._agent_model_keys,
+            e2e_gradient=bool(self.config.get("training", {}).get("e2e_gradient", False)),
+            communication_mode=self.communication_mode,
+            learnable_prefix_embeddings=list(self.learnable_prefix_embeddings) if self.learnable_prefix_embeddings is not None else None,
         )
 
         result = {"adjacency": A}
@@ -308,11 +382,19 @@ class MultiAgentSystem(nn.Module):
             )
 
             task_loss = self.task_loss_fn(final_logits, labels)
-            graph_loss_dict = self.graph_loss_fn(
-                A,
-                self.adjacency.prior,
-                valid_mask=self.adjacency.allowed_edges_mask,
-            )
+            if self.freeze_topology:
+                graph_loss_dict = {
+                    "loss": torch.tensor(0.0, device=task_loss.device),
+                    "loss_bce": torch.tensor(0.0, device=task_loss.device),
+                    "loss_sparse": torch.tensor(0.0, device=task_loss.device),
+                    "loss_concentrate": torch.tensor(0.0, device=task_loss.device),
+                }
+            else:
+                graph_loss_dict = self.graph_loss_fn(
+                    A,
+                    self.adjacency.prior,
+                    valid_mask=self.adjacency.allowed_edges_mask,
+                )
             total_loss = task_loss + graph_loss_dict["loss"]
 
             result.update({
@@ -337,8 +419,14 @@ class MultiAgentSystem(nn.Module):
         params = []
         if self.config.get("training", {}).get("train_strategy") == "full_finetune":
             params.extend(self.base_model.model.parameters())
-        params.extend(self.compressor.parameters())
-        params.extend(self.adjacency.parameters())
+        if self.compressors is not None:
+            params.extend(self.compressors.parameters())
+        elif self.compressor is not None:
+            params.extend(self.compressor.parameters())
+        if self.learnable_prefix_embeddings is not None:
+            params.extend(self.learnable_prefix_embeddings.parameters())
+        if not self.freeze_topology:
+            params.extend(self.adjacency.parameters())
         # Hidden projections (heterogeneous model alignment)
         if self.hidden_projections:
             params.extend(self.hidden_projections.parameters())

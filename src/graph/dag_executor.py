@@ -67,9 +67,10 @@ class DAGExecutor:
         self,
         agents: list[Agent],
         adjacency: torch.Tensor,
-        compressor: LatentCompressor,
+        compressor: LatentCompressor | None,
         task_token_ids: torch.LongTensor,
         task_attention_mask: torch.Tensor | None = None,
+        compressors: list[LatentCompressor] | None = None,
         prefix_projector: PrefixProjector | None = None,
         training: bool = True,
         answer_ids: torch.LongTensor | None = None,
@@ -87,6 +88,10 @@ class DAGExecutor:
         agent_projection_keys: list[str | None] | None = None,
         prefix_projectors: dict[str, PrefixProjector] | None = None,
         agent_model_keys: list[str] | None = None,
+        e2e_gradient: bool = False,
+        # Ablation: pure_prefix mode
+        communication_mode: str = "latent",
+        learnable_prefix_embeddings: list[torch.Tensor] | None = None,
     ) -> dict:
         """Execute all agents in topological order.
 
@@ -113,18 +118,49 @@ class DAGExecutor:
             raise ValueError("terminal agent must be the last node in execution_order")
 
         all_prefixes = [None] * n
-        all_text_outputs = [None] * n
+        all_text_outputs = [None] * n  # In pure_prefix mode: list[str] per agent (length B)
         agent_logs = []
 
         def collect_upstream_texts(agent_index: int) -> list[str]:
+            """Collect upstream text strings for inference (single-item)."""
             texts = []
             for upstream_idx in range(n):
                 message = all_text_outputs[upstream_idx]
                 if message is None:
                     continue
                 if float(adjacency[upstream_idx, agent_index].detach().item()) > 0.5:
-                    texts.append(message)
+                    if isinstance(message, list):
+                        texts.append(message[0])
+                    else:
+                        texts.append(message)
             return texts
+
+        def collect_upstream_texts_batched(agent_index: int, B: int) -> list[list[str]]:
+            """Collect upstream text strings for batched training: returns [B x num_upstream_texts].
+
+            In pure_prefix mode: collect ALL prior agents' texts (in execution order),
+            so every downstream agent sees the full upstream reasoning chain.
+            In other modes: filter by adjacency > 0.5.
+            """
+            upstream_texts_batch = [[] for _ in range(B)]
+            for upstream_idx in execution_order:
+                if upstream_idx == agent_index:
+                    break  # only collect agents that run before this one
+                message = all_text_outputs[upstream_idx]
+                if message is None:
+                    continue
+                include = (
+                    communication_mode == "pure_prefix"
+                    or float(adjacency[upstream_idx, agent_index].detach().item()) > 0.5
+                )
+                if include:
+                    if isinstance(message, list):
+                        for b in range(B):
+                            upstream_texts_batch[b].append(message[b] if b < len(message) else message[0])
+                    else:
+                        for b in range(B):
+                            upstream_texts_batch[b].append(message)
+            return upstream_texts_batch
 
         def get_prefix_projector_for(agent_index: int) -> PrefixProjector | None:
             """Resolve the correct PrefixProjector for a given agent."""
@@ -140,6 +176,12 @@ class DAGExecutor:
             if key is None:
                 return hidden
             return hidden_projections[key](hidden)
+
+        def get_compressor_for(agent_index: int) -> LatentCompressor:
+            """Resolve compressor: per-agent if available, else shared."""
+            if compressors is not None:
+                return compressors[agent_index]
+            return compressor
 
         def summarize_tensor(name: str, value: torch.Tensor | None) -> dict | None:
             if value is None:
@@ -158,6 +200,38 @@ class DAGExecutor:
 
         def _execute_single_nonterminal(j, upstream_prefix):
             """Execute a single non-terminal agent (original sequential path)."""
+            # ── pure_prefix ablation: own prefix + text communication ──
+            if communication_mode == "pure_prefix":
+                B = task_token_ids.shape[0]
+                own_emb = learnable_prefix_embeddings[j].expand(B, -1, -1)
+                own_pp = get_prefix_projector_for(j)
+                own_prefix_kv = own_pp(own_emb, target_dtype=agents[j].base_model.dtype) if own_pp is not None else None
+                upstream_texts_batch = collect_upstream_texts_batched(j, B)
+                text_output = agents[j].generate_answer(
+                    task_token_ids=task_token_ids,
+                    task_attention_mask=task_attention_mask,
+                    upstream_prefix_kv=own_prefix_kv,
+                    upstream_texts=upstream_texts_batch,
+                    max_new_tokens=max_new_tokens,
+                    inference_mode="chat_with_text",
+                    use_upstream_prefix=True,
+                    do_sample=do_sample,
+                    return_metadata=True,
+                )
+                generated = text_output["generated_text"]
+                # Store per-batch-item texts
+                all_text_outputs[j] = generated if isinstance(generated, list) else [generated] * B
+                if collect_agent_logs:
+                    agent_logs.append({
+                        "agent_id": agents[j].agent_id,
+                        "role_name": agents[j].role_name,
+                        "output_type": "pure_prefix_text",
+                        "system_prompt": agents[j].system_prompt,
+                        "received_upstream_texts": bool(any(upstream_texts_batch)),
+                        "generated_text": generated,
+                    })
+                return
+
             if not training and inference_mode == "chat_with_text":
                 upstream_texts = collect_upstream_texts(j)
                 text_output = agents[j].generate_answer(
@@ -202,7 +276,7 @@ class DAGExecutor:
             S_j = agent_output["hidden_trajectory"]
             S_j = project_hidden(j, S_j)
             mask_j = agent_output["compressor_mask"]
-            P_j = compressor(S_j, mask=mask_j)
+            P_j = get_compressor_for(j)(S_j, mask=mask_j)
             all_prefixes[j] = P_j
             if collect_agent_logs:
                 agent_logs.append({
@@ -287,19 +361,32 @@ class DAGExecutor:
                 prefix_embeds=batched_prefix_embeds if not use_kv else None,
                 past_key_values=batched_prefix_kv if use_kv else None,
                 num_latent_steps=reasoning_steps,
+                grad_last_k=compress_last_k,
             )
             del batched_prefix_kv
 
             trajectory = output["hidden_trajectory"]  # [num_agents*B, m, D]
+            initial_hidden_all = output.get("initial_hidden")  # [num_agents*B, input_seq_len, D] or None
 
             # Split back per agent
             k = min(compress_last_k, trajectory.shape[1])
             for idx, j in enumerate(agent_indices):
                 agent_traj = trajectory[idx * B : (idx + 1) * B]  # [B, m, D]
                 traj_to_compress = agent_traj[:, -k:, :]
-                mask_j = torch.ones(B, k, device=trajectory.device)
-                S_j = project_hidden(j, traj_to_compress)
-                P_j = compressor(S_j, mask=mask_j)
+
+                # Prepend initial encoding hidden states if available
+                if initial_hidden_all is not None:
+                    agent_initial = initial_hidden_all[idx * B : (idx + 1) * B]  # [B, seq_len, D]
+                    agent_initial = agent_initial.to(dtype=traj_to_compress.dtype)
+                    to_compress = torch.cat([agent_initial, traj_to_compress], dim=1)
+                    initial_mask = torch.ones(B, agent_initial.shape[1], device=trajectory.device)
+                    mask_j = torch.cat([initial_mask, torch.ones(B, k, device=trajectory.device)], dim=1)
+                else:
+                    to_compress = traj_to_compress
+                    mask_j = torch.ones(B, k, device=trajectory.device)
+
+                S_j = project_hidden(j, to_compress)
+                P_j = get_compressor_for(j)(S_j, mask=mask_j)
                 all_prefixes[j] = P_j
                 if collect_agent_logs:
                     agent_logs.append({
@@ -318,7 +405,7 @@ class DAGExecutor:
             nonterminal_in_level = [j for j in level if j != terminal_index]
             terminal_in_level = [j for j in level if j == terminal_index]
 
-            if len(nonterminal_in_level) > 1 and training:
+            if len(nonterminal_in_level) > 1 and training and not e2e_gradient and communication_mode == "latent":
                 # ── Batched execution for multiple independent non-terminal agents ──
                 upstream_prefixes = []
                 for j in nonterminal_in_level:
@@ -337,6 +424,45 @@ class DAGExecutor:
 
             # ── Handle terminal agent if in this level ──
             for j in terminal_in_level:
+                # ── pure_prefix ablation: own prefix + upstream text ──
+                if communication_mode == "pure_prefix":
+                    B = task_token_ids.shape[0]
+                    own_emb = learnable_prefix_embeddings[j].expand(B, -1, -1)
+                    terminal_pp = get_prefix_projector_for(j)
+                    own_prefix_kv = terminal_pp(own_emb, target_dtype=agents[j].base_model.dtype) if terminal_pp is not None else None
+                    upstream_texts_batch = collect_upstream_texts_batched(j, B)
+                    if training:
+                        terminal_output = agents[j].forward_for_loss(
+                            task_token_ids=task_token_ids,
+                            task_attention_mask=task_attention_mask,
+                            upstream_prefix_kv=own_prefix_kv,
+                            answer_ids=answer_ids,
+                            answer_mask=answer_mask,
+                            input_mode="chat_with_text",
+                            upstream_texts=upstream_texts_batch,
+                        )
+                    else:
+                        generation = agents[j].generate_answer(
+                            task_token_ids=task_token_ids,
+                            task_attention_mask=task_attention_mask,
+                            upstream_prefix_kv=own_prefix_kv,
+                            upstream_texts=upstream_texts_batch,
+                            max_new_tokens=max_new_tokens,
+                            inference_mode="chat_with_text",
+                            use_upstream_prefix=True,
+                            do_sample=do_sample,
+                            return_metadata=True,
+                        )
+                        if collect_agent_logs:
+                            agent_logs.append({
+                                "agent_id": agents[j].agent_id,
+                                "role_name": agents[j].role_name,
+                                "output_type": "text",
+                                "generated_text": generation["generated_text"],
+                                "generation": generation,
+                            })
+                    continue
+
                 upstream_prefix = self.aggregator.aggregate(
                     agent_index=j, adjacency=adjacency, all_prefixes=all_prefixes,
                 )

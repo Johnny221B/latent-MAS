@@ -75,6 +75,8 @@ class LearnableAdjacency(nn.Module):
         prior: torch.Tensor,
         allowed_edges_mask: torch.Tensor | None = None,
         init_scale: float = 6.0,
+        fixed_structure: bool = False,
+        noise_scale: float = 0.0,
     ):
         """
         Args:
@@ -83,6 +85,12 @@ class LearnableAdjacency(nn.Module):
             init_scale: magnitude for initializing logits.
                    Prior edges initialized to +init_scale (sigmoid ≈ 1),
                    non-prior edges initialized to -init_scale (sigmoid ≈ 0).
+            fixed_structure: if True, only prior edges are learnable.
+                   Non-prior edges are permanently masked to -inf (sigmoid=0).
+                   The topology cannot change, but prior edge weights can learn.
+            noise_scale: std of Gaussian noise added to initial logits for active
+                   edges. Breaks gradient symmetry between structurally equivalent
+                   edges (e.g. planner→{analyst,critic,verifier} in hierarchical graph).
         """
         super().__init__()
         n = prior.shape[0]
@@ -114,6 +122,19 @@ class LearnableAdjacency(nn.Module):
 
         # Mask out any illegal edges, including diagonal/self-loops.
         init_logits[~self.allowed_edges_mask] = float("-inf")
+
+        # Add random noise to active edges to break gradient symmetry between
+        # structurally equivalent edges (e.g. planner→{analyst,critic,verifier}).
+        # Applied before fixed_structure masking so forbidden edges stay at -inf.
+        if noise_scale > 0.0:
+            active_mask = init_logits != float("-inf")
+            noise = torch.randn_like(init_logits) * noise_scale
+            init_logits = torch.where(active_mask, init_logits + noise, init_logits)
+
+        # fixed_structure: also mask out non-prior edges permanently
+        if fixed_structure:
+            non_prior_mask = (prior < 0.5) & self.allowed_edges_mask
+            init_logits[non_prior_mask] = float("-inf")
 
         self.logits = nn.Parameter(init_logits)
 

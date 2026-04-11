@@ -35,7 +35,8 @@ class MultiAgentDataset(Dataset):
             raw = split_handler(raw, split)
 
         if max_samples is not None:
-            raw = raw.select(range(min(max_samples, len(raw))))
+            n = min(max_samples, len(raw))
+            raw = raw.select(range(n)) if hasattr(raw, "select") else raw[:n]
 
         self.data = raw
         self.question_field = task_config["question_field"]

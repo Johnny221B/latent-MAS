@@ -317,6 +317,7 @@ class Agent:
             prefix_embeds=upstream_prefix if upstream_prefix_kv is None else None,
             past_key_values=upstream_prefix_kv,
             num_latent_steps=self.reasoning_steps,
+            grad_last_k=self.compress_last_k,
         )
 
         trajectory = output["hidden_trajectory"]  # [B, m, D]
@@ -325,10 +326,21 @@ class Agent:
         # Only compress the last k hidden states
         k = min(self.compress_last_k, m)
         trajectory_to_compress = trajectory[:, -k:, :]
-        compressor_mask = torch.ones(B, k, device=trajectory.device)
+
+        # Prepend initial encoding hidden states so the compressor has rich context
+        # instead of just k=2 latent reasoning steps (which are degenerate with so few steps)
+        initial_hidden = output.get("initial_hidden")  # [B, input_seq_len, D] or None
+        if initial_hidden is not None:
+            initial_hidden = initial_hidden.to(dtype=trajectory_to_compress.dtype)
+            to_compress = torch.cat([initial_hidden, trajectory_to_compress], dim=1)
+            initial_mask = torch.ones(B, initial_hidden.shape[1], device=trajectory.device)
+            compressor_mask = torch.cat([initial_mask, torch.ones(B, k, device=trajectory.device)], dim=1)
+        else:
+            to_compress = trajectory_to_compress
+            compressor_mask = torch.ones(B, k, device=trajectory.device)
 
         return {
-            "hidden_trajectory": trajectory_to_compress,
+            "hidden_trajectory": to_compress,
             "compressor_mask": compressor_mask,
             "full_trajectory": trajectory,
             "prefix_len": output["prefix_len"],
@@ -354,6 +366,7 @@ class Agent:
         answer_ids: torch.LongTensor | None = None,
         answer_mask: torch.Tensor | None = None,
         input_mode: str = "legacy_plain_with_prefix",
+        upstream_texts: list[list[str]] | None = None,
     ) -> dict:
         if input_mode == "legacy_plain_with_prefix":
             role_ids = self._get_role_token_ids().expand(task_token_ids.shape[0], -1)
@@ -376,12 +389,14 @@ class Agent:
             prompt_len = task_token_ids.shape[1]
             logits_start = role_len
         else:
-            if input_mode != "chat_with_prefix":
+            if input_mode not in {"chat_with_prefix", "chat_with_text"}:
                 raise ValueError(f"Unsupported input_mode: {input_mode}")
+            _inference_mode = "chat_with_text" if input_mode == "chat_with_text" else "chat_with_prefix"
             prompt_ids, prompt_mask = self._build_generation_inputs(
                 task_token_ids=task_token_ids,
                 task_attention_mask=task_attention_mask,
-                inference_mode="chat_with_prefix",
+                inference_mode=_inference_mode,
+                upstream_texts=upstream_texts if input_mode == "chat_with_text" else None,
             )
             if answer_ids is not None:
                 input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
@@ -519,10 +534,13 @@ class Agent:
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
             
             prompt_len = input_ids.shape[1]
-            generated_ids = [
-                sequences[row_idx][prompt_len:].tolist() 
-                for row_idx in range(sequences.shape[0])
-            ]
+            generated_ids = []
+            for row_idx in range(sequences.shape[0]):
+                ids = sequences[row_idx][prompt_len:].tolist()
+                # Strip trailing pad tokens
+                while ids and ids[-1] == pad_token_id:
+                    ids.pop()
+                generated_ids.append(ids)
 
             return self._finalize_generation_outputs(
                 tokenizer=self.base_model.tokenizer,
@@ -571,7 +589,12 @@ class Agent:
 
             gen_out = generation_model.generate(**generate_kwargs)
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
-            generated_ids = [sequences[row_idx].tolist() for row_idx in range(sequences.shape[0])]
+            generated_ids = []
+            for row_idx in range(sequences.shape[0]):
+                ids = sequences[row_idx].tolist()
+                while ids and ids[-1] == pad_token_id:
+                    ids.pop()
+                generated_ids.append(ids)
 
             return self._finalize_generation_outputs(
                 tokenizer=self.base_model.tokenizer,
@@ -603,10 +626,12 @@ class Agent:
             sequences = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out[0]
             
             prompt_len = input_ids.shape[1]
-            generated_token_ids = [
-                sequences[row_idx][prompt_len:].tolist()
-                for row_idx in range(sequences.shape[0])
-            ]
+            generated_token_ids = []
+            for row_idx in range(sequences.shape[0]):
+                ids = sequences[row_idx][prompt_len:].tolist()
+                while ids and ids[-1] == pad_token_id:
+                    ids.pop()
+                generated_token_ids.append(ids)
             
             return self._finalize_generation_outputs(
                 tokenizer=self.base_model.tokenizer,

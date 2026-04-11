@@ -434,6 +434,7 @@ def load_training_checkpoint(
     grad_accum_steps: int = 1,
     base_model_module=None,
     trainable_base_model: bool = False,
+    learnable_prefix_module=None,
 ) -> dict:
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -445,15 +446,22 @@ def load_training_checkpoint(
     compressor_state = checkpoint.get("compressor_state")
     adjacency_state = checkpoint.get("adjacency_state")
     optimizer_state = checkpoint.get("optimizer_state")
-    if compressor_state is None or adjacency_state is None or optimizer_state is None:
+    if adjacency_state is None or optimizer_state is None:
         raise ValueError(
             "Resume checkpoint is missing one of the required training states: "
-            "compressor_state, adjacency_state, optimizer_state"
+            "adjacency_state, optimizer_state"
         )
+    if compressor_state is None and compressor is not None:
+        raise ValueError("Resume checkpoint is missing compressor_state but compressor exists")
 
-    compressor.load_state_dict(compressor_state)
+    if compressor is not None and compressor_state is not None:
+        compressor.load_state_dict(compressor_state)
     adjacency.load_state_dict(adjacency_state)
     optimizer.load_state_dict(optimizer_state)
+
+    learnable_prefix_state = checkpoint.get("learnable_prefix_state")
+    if learnable_prefix_module is not None and learnable_prefix_state is not None:
+        learnable_prefix_module.load_state_dict(learnable_prefix_state)
 
     prefix_projector_state = checkpoint.get("prefix_projector_state")
     if prefix_projectors is not None and isinstance(prefix_projector_state, dict):
@@ -516,6 +524,57 @@ def maybe_build_probe_wandb_table(run, samples: list[dict]):
     return table
 
 
+def compute_per_edge_adjacency_stats(
+    adjacency,
+    graph_loss_fn,
+    agent_roles: list[str],
+    grad_accum_steps: int = 1,
+) -> dict:
+    """Capture per-edge adjacency dynamics at each optimizer step.
+
+    Returns a dict with:
+      - edges: list of {src, dst, weight, total_grad, graph_grad, task_grad, sigmoid_deriv}
+      - summary: aggregate stats
+    """
+    with torch.no_grad():
+        A = adjacency.get_adjacency()
+        logits = adjacency.logits
+        total_grad = logits.grad.clone() if logits.grad is not None else torch.zeros_like(logits)
+        allowed = adjacency.allowed_edges_mask
+
+    # Compute graph-loss-only gradient analytically (cheap, no model forward needed)
+    logits_detached = logits.detach().clone().requires_grad_(True)
+    A_detached = torch.sigmoid(logits_detached)
+    graph_loss_only = graph_loss_fn(
+        A_detached, adjacency.prior, valid_mask=adjacency.allowed_edges_mask,
+    )
+    graph_loss_only["loss"].backward()
+    graph_grad = logits_detached.grad / grad_accum_steps  # match scaling
+
+    n = A.shape[0]
+    edges = []
+    for i in range(n):
+        for j in range(n):
+            if not allowed[i, j]:
+                continue
+            w = float(A[i, j].item())
+            tg = float(total_grad[i, j].item())
+            gg = float(graph_grad[i, j].item())
+            sig_d = w * (1.0 - w)  # sigmoid derivative
+            edges.append({
+                "src": agent_roles[i] if i < len(agent_roles) else str(i),
+                "dst": agent_roles[j] if j < len(agent_roles) else str(j),
+                "weight": round(w, 6),
+                "logit": round(float(logits[i, j].item()), 4),
+                "total_grad": round(tg, 8),
+                "graph_grad": round(gg, 8),
+                "task_grad": round(tg - gg, 8),
+                "sigmoid_deriv": round(sig_d, 8),
+            })
+
+    return {"edges": edges}
+
+
 def train(config_path: str, max_samples: int | None = None):
     config = load_config(config_path)
     training_cfg = config["training"]
@@ -560,11 +619,18 @@ def train(config_path: str, max_samples: int | None = None):
                 system.base_model.model,
                 **ddp_kwargs,
             )
-        # Wrap compressor with DDP
-        system.compressor = DDP(
-            system.compressor,
-            **ddp_kwargs,
-        )
+        # Wrap compressor(s) with DDP
+        if system.compressors is not None:
+            for idx in range(len(system.compressors)):
+                system.compressors[idx] = DDP(
+                    system.compressors[idx],
+                    **ddp_kwargs,
+                )
+        elif system.compressor is not None:
+            system.compressor = DDP(
+                system.compressor,
+                **ddp_kwargs,
+            )
         # Wrap prefix_projector(s) with DDP
         if system.prefix_projectors is not None:
             for key in list(system.prefix_projectors.keys()):
@@ -671,7 +737,12 @@ def train(config_path: str, max_samples: int | None = None):
     non_adj_params = []
     if training_cfg.get("train_strategy") == "full_finetune":
         non_adj_params.extend(system.base_model.model.parameters())
-    non_adj_params.extend(system.compressor.parameters())
+    if system.compressors is not None:
+        non_adj_params.extend(system.compressors.parameters())
+    elif system.compressor is not None:
+        non_adj_params.extend(system.compressor.parameters())
+    if system.learnable_prefix_embeddings is not None:
+        non_adj_params.extend(system.learnable_prefix_embeddings.parameters())
     if system.prefix_projectors is not None:
         non_adj_params.extend(system.prefix_projectors.parameters())
     elif system.prefix_projector is not None:
@@ -681,8 +752,12 @@ def train(config_path: str, max_samples: int | None = None):
 
     param_groups = [
         {"params": non_adj_params, "lr": base_lr},
-        {"params": list(system.adjacency.parameters()), "lr": adj_lr},
     ]
+    freeze_topology = bool(config.get("graph", {}).get("freeze_topology", False))
+    if not freeze_topology:
+        param_groups.append({"params": list(system.adjacency.parameters()), "lr": adj_lr})
+    elif is_main_process():
+        print("Adjacency topology frozen — not included in optimizer")
     optimizer = AdamW(param_groups, weight_decay=weight_decay)
     if is_main_process() and adj_lr != base_lr:
         print(f"Using separate adjacency lr: {adj_lr} (base lr: {base_lr})")
@@ -716,7 +791,16 @@ def train(config_path: str, max_samples: int | None = None):
     grad_accum_steps = training_cfg.get("gradient_accumulation_steps", 1)
     log_interval = training_cfg.get("log_interval", 1)
     save_interval = training_cfg.get("save_interval", 500)
-    compressor = system.compressor.module if is_ddp else system.compressor
+    if system.compressors is not None:
+        compressor_modules = [
+            (c.module if is_ddp else c) for c in system.compressors
+        ]
+        compressor = None  # not used for single compressor
+    else:
+        compressor = (system.compressor.module if is_ddp else system.compressor) if system.compressor is not None else None
+        compressor_modules = None
+    # Unwrap learnable_prefix_embeddings (not DDP-wrapped; gradients synced manually)
+    learnable_prefix_module = system.learnable_prefix_embeddings  # nn.ParameterList or None
     # Unwrap prefix_projector(s) for checkpoint save/load
     if system.prefix_projectors is not None:
         prefix_projector = None
@@ -748,6 +832,7 @@ def train(config_path: str, max_samples: int | None = None):
             grad_accum_steps=grad_accum_steps,
             base_model_module=base_model_module if trainable_base_model else None,
             trainable_base_model=trainable_base_model,
+            learnable_prefix_module=learnable_prefix_module,
         )
 
     # ── Output directory with timestamp or resume target ──
@@ -781,6 +866,7 @@ def train(config_path: str, max_samples: int | None = None):
 
     # ── Loss log ──
     loss_log = []  # list of dicts, saved to CSV
+    adjacency_log = []  # per-edge dynamics
     probe_history = []
     probe_history_path = output_dir / "probe_history.json"
     probe_metadata_path = output_dir / "probe_split.json"
@@ -826,6 +912,7 @@ def train(config_path: str, max_samples: int | None = None):
             comp_grad = None
             adj_grad = None
             proj_grad = None
+            adj_stats = None
             mem = None
 
             # ── Tokenize ──
@@ -882,14 +969,24 @@ def train(config_path: str, max_samples: int | None = None):
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 # ── Sync adjacency gradients across GPUs (manual allreduce) ──
-                # Must be inside the accumulation gate so it runs once per optimizer step,
-                # not once per micro-batch (which would shrink adj gradients).
-                if is_ddp and adjacency.logits.grad is not None:
+                if is_ddp and not freeze_topology and adjacency.logits.grad is not None:
                     dist.all_reduce(adjacency.logits.grad, op=dist.ReduceOp.AVG)
+                # ── Sync learnable_prefix_embeddings gradients across GPUs ──
+                if is_ddp and learnable_prefix_module is not None:
+                    for emb in learnable_prefix_module:
+                        if emb.grad is not None:
+                            dist.all_reduce(emb.grad, op=dist.ReduceOp.AVG)
                 mem = torch.cuda.max_memory_allocated(device) / 1024**3
                 scaler.unscale_(optimizer)
                 # Compute grad norms AFTER unscale so they reflect true magnitudes
-                comp_grad = compute_grad_norm(compressor.parameters())
+                if compressor_modules is not None:
+                    comp_grad = compute_grad_norm([p for c in compressor_modules for p in c.parameters()])
+                elif compressor is not None:
+                    comp_grad = compute_grad_norm(compressor.parameters())
+                elif learnable_prefix_module is not None:
+                    comp_grad = compute_grad_norm(learnable_prefix_module.parameters())
+                else:
+                    comp_grad = 0.0
                 adj_grad = compute_grad_norm([adjacency.logits])
                 if prefix_projectors_unwrapped is not None:
                     proj_grad = compute_grad_norm(
@@ -899,6 +996,16 @@ def train(config_path: str, max_samples: int | None = None):
                     proj_grad = compute_grad_norm(prefix_projector.parameters())
                 else:
                     proj_grad = 0.0
+                # ── Per-edge adjacency monitoring ──
+                adj_stats = None
+                if is_main_process():
+                    adj_stats = compute_per_edge_adjacency_stats(
+                        adjacency=adjacency,
+                        graph_loss_fn=system.graph_loss_fn,
+                        agent_roles=system.agent_roles,
+                        grad_accum_steps=grad_accum_steps,
+                    )
+
                 torch.nn.utils.clip_grad_norm_(system.get_trainable_params(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
@@ -992,7 +1099,15 @@ def train(config_path: str, max_samples: int | None = None):
 
             # ── Logging (main process only) ──
             if is_main_process() and (batch_idx + 1) % log_interval == 0:
-                display_comp_grad = comp_grad if comp_grad is not None else compute_grad_norm(compressor.parameters())
+                display_comp_grad = comp_grad if comp_grad is not None else (
+                    compute_grad_norm([p for c in compressor_modules for p in c.parameters()])
+                    if compressor_modules is not None
+                    else compute_grad_norm(compressor.parameters())
+                    if compressor is not None
+                    else compute_grad_norm(learnable_prefix_module.parameters())
+                    if learnable_prefix_module is not None
+                    else 0.0
+                )
                 if proj_grad is not None:
                     display_proj_grad = proj_grad
                 elif prefix_projectors_unwrapped is not None:
@@ -1021,6 +1136,20 @@ def train(config_path: str, max_samples: int | None = None):
                     f"elapsed:{format_duration(elapsed_seconds)} "
                     f"eta:{format_duration(eta_seconds)}"
                 )
+                # Print per-edge adjacency dynamics
+                if adj_stats is not None:
+                    edge_strs = []
+                    for e in adj_stats["edges"]:
+                        edge_strs.append(
+                            f"    {e['src']:>8s}→{e['dst']:<8s} "
+                            f"w={e['weight']:.4f} logit={e['logit']:+.2f} "
+                            f"∇total={e['total_grad']:+.2e} "
+                            f"∇task={e['task_grad']:+.2e} "
+                            f"∇graph={e['graph_grad']:+.2e} "
+                            f"σ'={e['sigmoid_deriv']:.2e}"
+                        )
+                    print("  Adjacency edges:")
+                    print("\n".join(edge_strs))
                 
             # ── Record loss ──
             if is_main_process():
@@ -1035,6 +1164,14 @@ def train(config_path: str, max_samples: int | None = None):
                     "proj_grad": proj_grad,
                     "adj_grad": adj_grad,
                 })
+                # Record per-edge adjacency dynamics
+                if adj_stats is not None:
+                    adjacency_log.append({
+                        "global_step": global_step,
+                        "task_loss": task_loss_val,
+                        "graph_loss": graph_loss_val,
+                        "edges": adj_stats["edges"],
+                    })
 
             # ── Checkpoint (main process only) ──
             if is_main_process() and should_save_checkpoint(global_step=global_step, save_interval=save_interval):
@@ -1044,8 +1181,16 @@ def train(config_path: str, max_samples: int | None = None):
                     "epoch": epoch,
                     "next_batch_idx": batch_idx + 1,
                     "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
-                    "compressor_state": compressor.state_dict(),
-                    "prefix_projector_state": (
+                    "compressor_state": (
+                        [c.state_dict() for c in compressor_modules]
+                        if compressor_modules is not None
+                        else compressor.state_dict() if compressor is not None
+                        else None
+                    ),
+                    "learnable_prefix_state": (
+                        learnable_prefix_module.state_dict()
+                        if learnable_prefix_module is not None else None
+                    ),                    "prefix_projector_state": (
                         {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
                         if prefix_projectors_unwrapped is not None
                         else prefix_projector.state_dict() if prefix_projector is not None
@@ -1091,6 +1236,11 @@ def train(config_path: str, max_samples: int | None = None):
                 writer.writeheader()
                 writer.writerows(loss_log)
 
+            # Save per-edge adjacency dynamics
+            adj_log_path = output_dir / "adjacency_log.json"
+            with open(adj_log_path, "w", encoding="utf-8") as f:
+                json.dump(adjacency_log, f, indent=2, ensure_ascii=False)
+
     eval_summaries = {}
     if evaluation_cfg.get("run_after_train", False):
         eval_kwargs = {
@@ -1133,7 +1283,16 @@ def train(config_path: str, max_samples: int | None = None):
                 "epoch": training_cfg["epochs"],
                 "next_batch_idx": 0,
                 "base_model_state": base_model_module.state_dict() if trainable_base_model else None,
-                "compressor_state": compressor.state_dict(),
+                "compressor_state": (
+                    [c.state_dict() for c in compressor_modules]
+                    if compressor_modules is not None
+                    else compressor.state_dict() if compressor is not None
+                    else None
+                ),
+                "learnable_prefix_state": (
+                    learnable_prefix_module.state_dict()
+                    if learnable_prefix_module is not None else None
+                ),
                 "prefix_projector_state": (
                     {k: v.state_dict() for k, v in prefix_projectors_unwrapped.items()}
                     if prefix_projectors_unwrapped is not None

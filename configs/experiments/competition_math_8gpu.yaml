@@ -1,0 +1,59 @@
+model:
+  name: "/mnt/3fs/data/shared_init_models/Qwen3-8B-INIT-std-0.006-rope-10000"
+  frozen: true
+  dtype: "bfloat16"
+
+graph:
+  config: "configs/graphs/hierarchical_6agent.json"
+  roles_dir: "configs/roles"
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+
+training:
+  task: "competition_math"
+  train_strategy: "communication_only"
+  input_mode: "chat_with_prefix"
+  batch_size: 8
+  lr: 0.0005
+  weight_decay: 0.01
+  epochs: 2
+  max_seq_len: 8192
+  lambda_struct: 0.0
+  lambda_sparse: 0.005
+  lambda_concentrate: 0.1
+  use_amp: true
+  warmup_steps: 100
+  gradient_accumulation_steps: 1
+  log_interval: 10
+  save_interval: 500
+
+training_probe:
+  enabled: false
+  samples: 0
+  seed: 42
+  every_n_steps: 100
+  batch_size: 4
+  max_new_tokens: 256
+  write_predictions_json: true
+  write_agent_logs: false
+
+evaluation:
+  run_after_train: false
+
+reasoning:
+  steps_per_agent: 25
+  compress_last_k: 25
+
+output:
+  dir: "outputs/competition_math_8b_8gpu"
+  log_dir: "logs"
+
+report:
+  use_wandb: false
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "offline"

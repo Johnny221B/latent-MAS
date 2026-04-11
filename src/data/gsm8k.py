@@ -1,10 +1,27 @@
 """GSM8K dataset helpers and config."""
+import json
 import re
+from pathlib import Path
 
-def _load_hf_dataset(dataset_name: str, subset: str | None, split: str):
-    from datasets import load_dataset
+LOCAL_DATA_DIR = Path("/mnt/3fs/data/yfzhang/cache/local_datasets")
+PARQUET_DATA_DIR = Path("/blue/buyuheng/chengzhi.ucsb/code/toby/data")
 
-    return load_dataset(dataset_name, subset, split=split)
+
+def _load_local(split: str):
+    # Try parquet first (available on HiPerGator)
+    parquet_path = PARQUET_DATA_DIR / f"gsm8k_{split}.parquet"
+    if parquet_path.exists():
+        import pandas as pd
+        df = pd.read_parquet(parquet_path)
+        records = df.to_dict(orient="records")
+        for i, r in enumerate(records):
+            if "id" not in r:
+                r["id"] = i
+        return records
+    # Fall back to JSON
+    path = LOCAL_DATA_DIR / f"gsm8k_{split}.json"
+    with open(path) as f:
+        return json.load(f)
 
 
 def _format_gsm8k_answer(answer_text: str) -> str:
@@ -15,7 +32,7 @@ def _format_gsm8k_answer(answer_text: str) -> str:
 def build_task_configs() -> dict:
     return {
         "gsm8k": {
-            "loader": lambda split: _load_hf_dataset("openai/gsm8k", "main", split),
+            "loader": _load_local,
             "question_id_field": "id",
             "question_field": "question",
             "answer_field": "answer",
