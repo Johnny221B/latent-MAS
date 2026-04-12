@@ -139,7 +139,7 @@ class MultiAgentSystem(nn.Module):
             # Override reasoning steps from experiment config if provided
             if "reasoning" in config and "steps_per_agent" in config["reasoning"]:
                 role_config["reasoning_steps"] = config["reasoning"]["steps_per_agent"]
-            if "compress_last_k" in config["reasoning"]:
+            if "reasoning" in config and "compress_last_k" in config["reasoning"]:
                 role_config["compress_last_k"] = config["reasoning"]["compress_last_k"]
             role_config["enable_thinking"] = config.get("model", {}).get("enable_thinking", False)
             global_sp = config.get("training", {}).get("global_system_prompt", None)

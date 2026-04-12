@@ -14,6 +14,10 @@ def _load_local(split: str):
         return json.load(f)
 
 
+def _format_competition_math_question(item: dict) -> str:
+    return item["problem"] + "\n\nPlease put your final answer in \\boxed{}."
+
+
 def build_task_configs() -> dict:
     return {
         "competition_math": {
@@ -23,6 +27,7 @@ def build_task_configs() -> dict:
             "question_field": "problem",
             "answer_field": "solution",
             "answer_extractor": _extract_boxed_answer,
+            "question_formatter": _format_competition_math_question,
             "extra_fields": ("level", "type"),
         }
     }

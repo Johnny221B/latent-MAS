@@ -49,7 +49,7 @@ def _format_arc_question(item: dict) -> str:
     ]
     if not choice_lines:
         return question
-    return f"{question}\n\nChoices:\n" + "\n".join(choice_lines)
+    return f"{question}\n\nChoices:\n" + "\n".join(choice_lines) + "\n\nPlease put your final answer in \\boxed{}."
 
 
 _NUM_TO_LETTER = {"1": "A", "2": "B", "3": "C", "4": "D", "5": "E"}

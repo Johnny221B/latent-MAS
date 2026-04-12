@@ -12,6 +12,10 @@ def _load_local(split: str):
         return json.load(f)
 
 
+def _format_amc23_question(item: dict) -> str:
+    return item["question"] + "\n\nPlease put your final answer in \\boxed{}."
+
+
 def build_task_configs() -> dict:
     return {
         "amc23": {
@@ -20,5 +24,6 @@ def build_task_configs() -> dict:
             "question_id_field": "id",
             "question_field": "question",
             "answer_field": "answer",
+            "question_formatter": _format_amc23_question,
         }
     }

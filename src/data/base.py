@@ -43,6 +43,18 @@ class MultiAgentDataset(Dataset):
         self.answer_field = task_config["answer_field"]
         self.question_id_field = task_config["question_id_field"]
         self.answer_extractor = task_config.get("answer_extractor")
+        # train_label_extractor: cleans raw answer for use as training label.
+        # If None, raw_answer is used as-is (suitable when full solution is wanted,
+        # e.g. competition_math). If set, it should clean formatting artefacts
+        # (e.g. remove <<computation>> annotations in GSM8K).
+        self.train_label_extractor = task_config.get("train_label_extractor")
+        # raw_answer_field: if set, use this field as training label instead of
+        # answer_field. Useful when training label and eval answer come from
+        # different fields (e.g. gsm8k_instruction: output vs final_answer).
+        self.raw_answer_field = task_config.get("raw_answer_field")
+        # raw_answer_formatter: takes the full item dict and returns the
+        # training label string. Takes precedence over raw_answer_field.
+        self.raw_answer_formatter = task_config.get("raw_answer_formatter")
         self.question_formatter = task_config.get("question_formatter")
         self.extra_fields = tuple(task_config.get("extra_fields", ()))
 
@@ -68,7 +80,15 @@ class MultiAgentDataset(Dataset):
             "question_id": str(question_id),
             "question": question,
             "answer": answer,
-            "raw_answer": str(raw_answer),
+            "raw_answer": (
+                self.raw_answer_formatter(item)
+                if self.raw_answer_formatter is not None
+                else str(item[self.raw_answer_field])
+                if self.raw_answer_field is not None
+                else self.train_label_extractor(str(raw_answer))
+                if self.train_label_extractor is not None
+                else str(raw_answer)
+            ),
             **{
                 field: item[field]
                 for field in getattr(self, "extra_fields", ())

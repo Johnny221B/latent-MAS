@@ -38,9 +38,18 @@ def extract_answer(text: str, task_type: str = "gsm8k") -> str:
 def _extract_gsm8k(text: str) -> str:
     """Extract numeric answer from GSM8K-style output.
 
-    Priority: <answer> tag > #### pattern > "answer is" pattern > last number.
+    Priority: \\boxed{} > <answer> tag > #### pattern > "answer is" pattern > last number.
     """
-    # Try <answer> tag first (matches training data format)
+    # Try \boxed{} first (highest priority when boxed prompt is used)
+    match = re.search(r"\\boxed\s*\{([^}]*)\}", text)
+    if match:
+        val = match.group(1).strip()
+        numbers = re.findall(r"-?[\d,]+\.?\d*", val)
+        if numbers:
+            return _normalize_numeric_text(numbers[-1])
+        return val
+
+    # Try <answer> tag
     match = re.search(r"<answer>\s*(.*?)\s*</answer>", text, re.DOTALL)
     if match:
         answer_text = match.group(1).strip()
