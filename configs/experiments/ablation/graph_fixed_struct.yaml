@@ -1,0 +1,41 @@
+compressor:
+  dropout: 0.1
+  num_heads: 8
+  num_layers: 1
+  num_queries: 16
+graph:
+  config: configs/graphs/chain_4agent.json
+  init_scale: 2.0
+  roles_dir: configs/roles
+  freeze_topology: false
+  fixed_structure: true
+model:
+  frozen: true
+  name: /mnt/3fs/data/yfzhang/workspace/toby/latent-MAS/.cache/Qwen3-4B
+  enable_thinking: false
+  dtype: bfloat16
+output:
+  dir: outputs/ablation/graph_fixed_struct
+  log_dir: logs
+reasoning:
+  compress_last_k: 10
+  steps_per_agent: 20
+report:
+  use_wandb: false
+training:
+  adjacency_lr: 0.01
+  batch_size: 4
+  epochs: 2
+  gradient_accumulation_steps: 2
+  input_mode: chat_with_prefix
+  lambda_add: 0.1
+  lambda_drop: 0.5
+  lambda_sparse: 0.01
+  log_interval: 1
+  lr: 3.0e-05
+  max_seq_len: 8192
+  save_interval: 5000
+  task: competition_math
+  train_strategy: communication_only
+  use_amp: true
+  weight_decay: 0.01

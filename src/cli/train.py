@@ -734,35 +734,46 @@ def train(config_path: str, max_samples: int | None = None):
     # ── Optimizer ──
     base_lr = float(training_cfg["lr"])
     adj_lr = float(training_cfg.get("adjacency_lr", base_lr))
+    mlp_lr = float(training_cfg.get("mlp_lr", base_lr))
     weight_decay = float(training_cfg.get("weight_decay", 0.01))
 
-    non_adj_params = []
+    # Base model params (full_finetune only)
+    base_params = []
     if training_cfg.get("train_strategy") == "full_finetune":
-        non_adj_params.extend(system.base_model.model.parameters())
-    if system.compressors is not None:
-        non_adj_params.extend(system.compressors.parameters())
-    elif system.compressor is not None:
-        non_adj_params.extend(system.compressor.parameters())
-    if system.learnable_prefix_embeddings is not None:
-        non_adj_params.extend(system.learnable_prefix_embeddings.parameters())
-    if system.prefix_projectors is not None:
-        non_adj_params.extend(system.prefix_projectors.parameters())
-    elif system.prefix_projector is not None:
-        non_adj_params.extend(system.prefix_projector.parameters())
-    if system.hidden_projections:
-        non_adj_params.extend(system.hidden_projections.parameters())
+        base_params.extend(system.base_model.model.parameters())
 
-    param_groups = [
-        {"params": non_adj_params, "lr": base_lr},
-    ]
+    # MLP params: compressor + prefix_projector + hidden_projections
+    mlp_params = []
+    if system.compressors is not None:
+        mlp_params.extend(system.compressors.parameters())
+    elif system.compressor is not None:
+        mlp_params.extend(system.compressor.parameters())
+    if system.learnable_prefix_embeddings is not None:
+        mlp_params.extend(system.learnable_prefix_embeddings.parameters())
+    if system.prefix_projectors is not None:
+        mlp_params.extend(system.prefix_projectors.parameters())
+    elif system.prefix_projector is not None:
+        mlp_params.extend(system.prefix_projector.parameters())
+    if system.hidden_projections:
+        mlp_params.extend(system.hidden_projections.parameters())
+
+    param_groups = []
+    if base_params:
+        param_groups.append({"params": base_params, "lr": base_lr, "name": "base_model"})
+    if mlp_params:
+        param_groups.append({"params": mlp_params, "lr": mlp_lr, "name": "mlp"})
+
     freeze_topology = bool(config.get("graph", {}).get("freeze_topology", False))
     if not freeze_topology:
-        param_groups.append({"params": list(system.adjacency.parameters()), "lr": adj_lr})
+        param_groups.append({"params": list(system.adjacency.parameters()), "lr": adj_lr, "name": "adjacency"})
     elif is_main_process():
         print("Adjacency topology frozen — not included in optimizer")
     optimizer = AdamW(param_groups, weight_decay=weight_decay)
-    if is_main_process() and adj_lr != base_lr:
-        print(f"Using separate adjacency lr: {adj_lr} (base lr: {base_lr})")
+    if is_main_process():
+        if mlp_lr != base_lr:
+            print(f"Using separate MLP lr: {mlp_lr} (base lr: {base_lr})")
+        if adj_lr != base_lr:
+            print(f"Using separate adjacency lr: {adj_lr} (base lr: {base_lr})")
 
     # ── LR Scheduler ──
     warmup_steps = int(training_cfg.get("warmup_steps", 0))

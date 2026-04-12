@@ -1,0 +1,45 @@
+compressor:
+  dropout: 0.1
+  num_heads: 8
+  num_layers: 1
+  num_queries: 16
+graph:
+  config: configs/graphs/chain_4agent.json
+  init_scale: 2.0
+  roles_dir: configs/roles
+  freeze_topology: false
+  fixed_structure: false
+model:
+  frozen: true
+  name: /mnt/3fs/data/yfzhang/workspace/toby/latent-MAS/.cache/Qwen3-4B
+  enable_thinking: true
+  dtype: float32
+output:
+  dir: /mnt/3fs/data/yfzhang/workspace/toby/latent-MAS/.claude/worktrees/toby/outputs/ablation/gsm8k_think_1ep_mlplr
+  log_dir: logs
+reasoning:
+  compress_last_k: 10
+  steps_per_agent: 20
+report:
+  use_wandb: false
+training:
+  adjacency_lr: 0.01
+  mlp_lr: 0.001
+  batch_size: 4
+  epochs: 1
+  gradient_accumulation_steps: 4
+  input_mode: chat_with_prefix
+  lambda_add: 0.1
+  lambda_drop: 0.5
+  lambda_sparse: 0.01
+  log_interval: 1
+  lr: 2.0e-05
+  seed: 42
+  max_seq_len: 16384
+  save_interval: 5000
+  save_final_checkpoint: true
+  shuffle: true
+  task: gsm8k
+  train_strategy: communication_only
+  use_amp: true
+  weight_decay: 0.01

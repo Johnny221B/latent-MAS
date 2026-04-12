@@ -1542,6 +1542,36 @@ def evaluate(
     checkpoint_dir = Path(output_dir) if output_dir is not None else Path(checkpoint_path).parent
     persist_eval_configs(output_dir=checkpoint_dir, eval_config_path=eval_config_path)
 
+    # Save the effective config: merged model config + all CLI-passed parameters,
+    # so the file alone is a complete record of what was actually run.
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    effective_config_path = checkpoint_dir / "eval_effective_config.yaml"
+    import yaml as _yaml
+    eval_run_record = {
+        **config,
+        "eval_run": {
+            "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+            "original_config_path": str(config_path),
+            "eval_config_path": str(eval_config_path) if eval_config_path else None,
+            "split": split,
+            "max_samples": max_samples,
+            "generation_max_new_tokens": generation_max_new_tokens,
+            "inference_mode": inference_mode,
+            "no_thinking": no_thinking,
+            "model_dtype": model_dtype,
+            "use_terminal_prefix": use_terminal_prefix,
+            "do_sample": do_sample,
+            "num_gpus": num_gpus,
+            "batch_size": batch_size,
+            "output_dir": str(checkpoint_dir),
+        },
+    }
+    effective_config_path.write_text(
+        _yaml.dump(eval_run_record, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_path = str(effective_config_path)
+
     if max_samples is not None and max_samples < 0:
         max_samples = None
 
