@@ -68,6 +68,7 @@ class MultiAgentDataset(Dataset):
             "question_id": str(question_id),
             "question": question,
             "answer": answer,
+            "raw_answer": str(raw_answer),
             **{
                 field: item[field]
                 for field in getattr(self, "extra_fields", ())

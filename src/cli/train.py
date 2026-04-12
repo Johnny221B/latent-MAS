@@ -55,6 +55,8 @@ def collate_fn(batch: list[dict]) -> dict:
     }
     if batch and "question_id" in batch[0]:
         payload["question_ids"] = [item["question_id"] for item in batch]
+    if batch and "raw_answer" in batch[0]:
+        payload["raw_answers"] = [item["raw_answer"] for item in batch]
     return payload
 
 
@@ -924,7 +926,7 @@ def train(config_path: str, max_samples: int | None = None):
             task_attention_mask = tokenized["attention_mask"].to(device)
 
             answer_tokenized = system.base_model.tokenize(
-                batch["answers"],
+                batch.get("raw_answers", batch["answers"]),
                 max_length=2048,
                 add_special_tokens=training_input_mode != "chat_with_prefix",
             )
