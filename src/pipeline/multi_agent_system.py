@@ -409,6 +409,7 @@ class MultiAgentSystem(nn.Module):
         else:
             result["generated_text"] = dag_output["generated_text"]
             result["generation"] = dag_output["generation"]
+            result["total_generated_tokens"] = dag_output.get("total_generated_tokens")
             if collect_agent_logs:
                 result["agent_logs"] = dag_output.get("agent_logs", [])
 

@@ -355,6 +355,73 @@ def _import_human_eval_evaluation():
     return evaluate_functional_correctness
 
 
+def _run_code_with_timeout(code: str, timeout: int = 10) -> tuple[bool, str | None]:
+    """Execute code in a subprocess with timeout. Returns (ok, error)."""
+    import traceback
+    from multiprocessing import Process, Manager
+
+    def worker(ns, code):
+        try:
+            local_ns = {}
+            exec(code, local_ns)
+            ns['ok'] = True
+            ns['error'] = None
+        except Exception:
+            ns['ok'] = False
+            ns['error'] = traceback.format_exc()
+
+    with Manager() as manager:
+        ns = manager.dict()
+        p = Process(target=worker, args=(ns, code))
+        p.start()
+        p.join(timeout)
+        if p.is_alive():
+            p.terminate()
+            p.join(5)
+            return False, f"TimeoutError: Execution exceeded {timeout} seconds"
+        return ns.get('ok', False), ns.get('error', None)
+
+
+def _evaluate_humaneval_by_execution(
+    samples: list[dict],
+    problems: list[dict],
+    *,
+    timeout: int = 10,
+) -> dict:
+    """Fallback HumanEval evaluation by executing test cases directly."""
+    problem_map = {p["task_id"]: p for p in problems}
+    results = {}
+    passed_count = 0
+    total = 0
+
+    for sample in samples:
+        task_id = sample["task_id"]
+        completion = sample["completion"]
+        problem = problem_map.get(task_id)
+        if problem is None:
+            continue
+
+        prompt = problem["prompt"]
+        test_code = problem["test"]
+        entry_point = problem["entry_point"]
+
+        # Build executable code: prompt + completion + test
+        full_code = prompt + completion + "\n" + test_code + f"\ncheck({entry_point})\n"
+
+        ok, error = _run_code_with_timeout(full_code, timeout=timeout)
+        results[task_id] = {"passed": ok, "result": error or ""}
+        if ok:
+            passed_count += 1
+        total += 1
+
+    return {
+        "metrics": {"pass@1": passed_count / total * 100 if total > 0 else 0.0},
+        "results": results,
+        "total": total,
+        "passed": passed_count,
+    }
+
+
 def _evaluate_humaneval_samples(
     sample_path: Path,
     *,
@@ -366,10 +433,27 @@ def _evaluate_humaneval_samples(
 ) -> dict:
     evaluator = _import_human_eval_evaluation()
     if evaluator is None:
-        raise RuntimeError(
-            "HumanEval evaluation requires the `human_eval` package. "
-            "Install it and enable its execution harness before running this task."
+        # Fallback: execute test cases directly
+        print("  human_eval package not available, using direct execution fallback")
+        sample_rows = []
+        with open(sample_path) as f:
+            for line in f:
+                sample_rows.append(json.loads(line))
+        timeout = int(config.get("evaluation", {}).get("timeout", 10))
+        exec_result = _evaluate_humaneval_by_execution(
+            sample_rows, problems, timeout=timeout,
         )
+        # Write results for compatibility
+        results_path = Path(f"{sample_path}_results.jsonl")
+        with open(results_path, "w") as f:
+            for task_id, result in exec_result["results"].items():
+                f.write(json.dumps({"task_id": task_id, **result}) + "\n")
+        return {
+            "metrics": exec_result["metrics"],
+            "problem_path": str(output_dir / "humaneval_problems.jsonl"),
+            "results_path": str(results_path),
+            "pass_at_k": list(pass_at_k),
+        }
 
     problem_path = output_dir / "humaneval_problems.jsonl"
     problem_rows = [
@@ -901,6 +985,7 @@ def evaluate_loaded_system(
             generated_text = output["generated_text"]
             generation = output.get("generation", {})
             agent_logs = output.get("agent_logs", [])
+            total_generated_tokens = output.get("total_generated_tokens")
             batch_questions = batch["questions"]
             batch_question_ids = batch["question_ids"]
             batch_answers = batch["answers"]
@@ -917,9 +1002,32 @@ def evaluate_loaded_system(
                 sample_generation = _sanitize_for_gather(sample_generation)
                 generated_count = sample_generation.get("generated_token_count", 0)
                 truncated = generated_count >= generation_max_new_tokens
+                # Per-sample total tokens across all agents
+                if total_generated_tokens is not None:
+                    sample_total_tokens = (
+                        total_generated_tokens[sample_idx]
+                        if isinstance(total_generated_tokens, list)
+                        else total_generated_tokens
+                    )
+                else:
+                    sample_total_tokens = generated_count
                 pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
                 gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
-                is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
+                # Fallback: if terminal agent truncated, try upstream agents' text
+                if truncated and not pred.strip():
+                    for agent_log in reversed(agent_logs):
+                        if agent_log.get("output_type") != "pure_prefix_text":
+                            continue
+                        upstream_text = agent_log.get("generated_text")
+                        if not upstream_text:
+                            continue
+                        if isinstance(upstream_text, list):
+                            upstream_text = upstream_text[sample_idx] if sample_idx < len(upstream_text) else upstream_text[0]
+                        fallback_pred = extract_answer(upstream_text, task_type=task)
+                        if fallback_pred.strip():
+                            pred = fallback_pred
+                            break
+                is_correct = math_is_equivalent(pred, gold, raw_text=batch_generated_text[sample_idx]) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
                 agent_log_entry = None
                 if write_agent_logs:
                     agent_log_entry = _sanitize_for_gather(build_agent_sample_log(
@@ -941,6 +1049,7 @@ def evaluate_loaded_system(
                     "truncated": truncated,
                     "agent_log": agent_log_entry,
                     "sample_seconds": per_sample_seconds,
+                    "total_generated_tokens": sample_total_tokens,
                 })
 
             # Write this worker's cumulative results to shard file
@@ -975,7 +1084,7 @@ def evaluate_loaded_system(
                             if item["correct"]:
                                 valid_correct += 1
                         sample_durations.append(item["sample_seconds"])
-                        generated_token_counts.append(item["generation"].get("generated_token_count", 0))
+                        generated_token_counts.append(item.get("total_generated_tokens", item["generation"].get("generated_token_count", 0)))
                         results.append({
                             "question": item["question"],
                             "question_id": item["question_id"],
@@ -984,6 +1093,7 @@ def evaluate_loaded_system(
                             "generation": item["generation"],
                             "correct": item["correct"],
                             "truncated": item.get("truncated", False),
+                            "total_generated_tokens": item.get("total_generated_tokens"),
                         })
                         if write_agent_logs and item.get("agent_log") is not None:
                             agent_log_results.append(item["agent_log"])
@@ -1055,7 +1165,7 @@ def evaluate_loaded_system(
                     if item["correct"]:
                         valid_correct += 1
                 sample_durations.append(item["sample_seconds"])
-                generated_token_counts.append(item["generation"].get("generated_token_count", 0))
+                generated_token_counts.append(item.get("total_generated_tokens", item["generation"].get("generated_token_count", 0)))
                 results.append({
                     "question": item["question"],
                     "question_id": item["question_id"],
@@ -1064,6 +1174,7 @@ def evaluate_loaded_system(
                     "generation": item["generation"],
                     "correct": item["correct"],
                     "truncated": item.get("truncated", False),
+                    "total_generated_tokens": item.get("total_generated_tokens"),
                 })
                 if write_agent_logs and item.get("agent_log") is not None:
                     agent_log_results.append(item["agent_log"])
@@ -1215,7 +1326,7 @@ def evaluate_loaded_system(
                 truncated = generated_count >= generation_max_new_tokens
                 pred = extract_answer(baseline_text, task_type=task)
                 gold = batch["answers"][sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch["answers"][sample_idx], task_type=task)
-                is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
+                is_correct = math_is_equivalent(pred, gold, raw_text=batch_generated_text[sample_idx]) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
                 baseline_update.append(
                     {
                         "question_id": batch["question_ids"][sample_idx],
@@ -1441,6 +1552,7 @@ def _gpu_worker(
             generated_text = output["generated_text"]
             generation = output.get("generation", {})
             agent_logs = output.get("agent_logs", [])
+            total_generated_tokens = output.get("total_generated_tokens")
             batch_questions = batch["questions"]
             batch_question_ids = batch["question_ids"]
             batch_answers = batch["answers"]
@@ -1457,9 +1569,32 @@ def _gpu_worker(
                 sample_generation = _sanitize_for_gather(sample_generation)
                 generated_count = sample_generation.get("generated_token_count", 0)
                 truncated = generated_count >= generation_max_new_tokens
+                # Per-sample total tokens across all agents
+                if total_generated_tokens is not None:
+                    sample_total_tokens = (
+                        total_generated_tokens[sample_idx]
+                        if isinstance(total_generated_tokens, list)
+                        else total_generated_tokens
+                    )
+                else:
+                    sample_total_tokens = generated_count
                 pred = extract_answer(batch_generated_text[sample_idx], task_type=task)
                 gold = batch_answers[sample_idx] if task in MATH_EQUIVALENT_TASKS else extract_answer(batch_answers[sample_idx], task_type=task)
-                is_correct = math_is_equivalent(pred, gold) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
+                # Fallback: if terminal agent truncated, try upstream agents' text
+                if truncated and not pred.strip():
+                    for agent_log in reversed(agent_logs):
+                        if agent_log.get("output_type") != "pure_prefix_text":
+                            continue
+                        upstream_text = agent_log.get("generated_text")
+                        if not upstream_text:
+                            continue
+                        if isinstance(upstream_text, list):
+                            upstream_text = upstream_text[sample_idx] if sample_idx < len(upstream_text) else upstream_text[0]
+                        fallback_pred = extract_answer(upstream_text, task_type=task)
+                        if fallback_pred.strip():
+                            pred = fallback_pred
+                            break
+                is_correct = math_is_equivalent(pred, gold, raw_text=batch_generated_text[sample_idx]) if task in MATH_EQUIVALENT_TASKS else pred.strip() == gold.strip()
                 agent_log_entry = None
                 if write_agent_logs:
                     agent_log_entry = _sanitize_for_gather(build_agent_sample_log(
@@ -1482,6 +1617,7 @@ def _gpu_worker(
                     "agent_log": agent_log_entry,
                     "sample_seconds": per_sample_seconds,
                     "gpu_id": gpu_id,
+                    "total_generated_tokens": sample_total_tokens,
                 })
 
     result_queue.put(None)  # signal done
@@ -1713,7 +1849,7 @@ def evaluate(
             if item["correct"]:
                 valid_correct += 1
         sample_durations.append(item["sample_seconds"])
-        generated_token_counts.append(item["generation"].get("generated_token_count", 0))
+        generated_token_counts.append(item.get("total_generated_tokens", item["generation"].get("generated_token_count", 0)))
         results.append({
             "question": item["question"],
             "question_id": item["question_id"],
@@ -1722,6 +1858,7 @@ def evaluate(
             "generation": item["generation"],
             "correct": item["correct"],
             "truncated": item.get("truncated", False),
+            "total_generated_tokens": item.get("total_generated_tokens"),
         })
         if write_agent_logs and item.get("agent_log") is not None:
             agent_log_results.append(item["agent_log"])

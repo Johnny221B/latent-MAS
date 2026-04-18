@@ -8,8 +8,13 @@ LOCAL_DATA_DIR = Path("/mnt/3fs/data/yfzhang/cache/local_datasets")
 
 def _load_local(split: str):
     path = LOCAL_DATA_DIR / f"gsm8k_{split}.json"
-    with open(path) as f:
-        return json.load(f)
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    # Fallback: load from HuggingFace datasets
+    from datasets import load_dataset
+    ds = load_dataset("openai/gsm8k", "main", split=split)
+    return [{"id": f"gsm8k-{i}", **row} for i, row in enumerate(ds)]
 
 
 def _format_gsm8k_answer(answer_text: str) -> str:

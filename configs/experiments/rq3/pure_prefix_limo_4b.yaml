@@ -1,0 +1,52 @@
+# RQ3 Baseline 1: Fix graph + prefix tuning + text-space communication, limo (119 samples)
+model:
+  name: "Qwen/Qwen3-4B"
+  dtype: bfloat16
+  frozen: true
+
+graph:
+  config: "configs/graphs/chain_4agent.json"
+  roles_dir: "configs/roles/text"
+  freeze_topology: true
+
+communication:
+  mode: "pure_prefix"
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+  num_layers: 1
+
+training:
+  task: "am_deepseek_r1_distilled"
+  source: "limo"
+  input_mode: "chat_with_prefix"
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
+  batch_size: 2
+  lr: 0.0005
+  weight_decay: 0.01
+  epochs: 2
+  max_seq_len: 16384
+  use_amp: true
+  lambda_add: 0.0
+  lambda_drop: 0.0
+  lambda_sparse: 0.0
+  gradient_accumulation_steps: 4
+  log_interval: 1
+  save_interval: 5000
+
+reasoning:
+  steps_per_agent: 40
+  compress_last_k: 40
+
+output:
+  dir: "outputs/rq3/pure_prefix_limo_4b"
+  log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

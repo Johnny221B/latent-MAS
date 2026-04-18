@@ -229,6 +229,7 @@ class DAGExecutor:
                         "system_prompt": agents[j].system_prompt,
                         "received_upstream_texts": bool(any(upstream_texts_batch)),
                         "generated_text": generated,
+                        "generation": text_output,
                     })
                 return
 
@@ -538,9 +539,36 @@ class DAGExecutor:
                 "all_prefixes": all_prefixes,
             }
         else:
+            # Compute total generated tokens across all agents.
+            # Latent mode: only terminal agent has generation → equals terminal count.
+            # Pure-prefix mode: all agents have generation → sum of all agents' tokens.
+            total_generated_tokens = None
+            if agent_logs:
+                per_agent_counts = []
+                for log_entry in agent_logs:
+                    gen = log_entry.get("generation")
+                    if isinstance(gen, dict):
+                        count = gen.get("generated_token_count", 0)
+                        per_agent_counts.append(count)
+                if per_agent_counts:
+                    if any(isinstance(c, list) for c in per_agent_counts):
+                        B = max(len(c) for c in per_agent_counts if isinstance(c, list))
+                        total_generated_tokens = [
+                            sum(
+                                (c[b] if b < len(c) else 0) if isinstance(c, list) else int(c)
+                                for c in per_agent_counts
+                            )
+                            for b in range(B)
+                        ]
+                    else:
+                        total_generated_tokens = sum(int(c) for c in per_agent_counts)
+            if total_generated_tokens is None:
+                total_generated_tokens = generation.get("generated_token_count")
+
             return {
                 "generated_text": generation["generated_text"],
                 "generation": generation,
                 "all_prefixes": all_prefixes,
                 "agent_logs": agent_logs,
+                "total_generated_tokens": total_generated_tokens,
             }

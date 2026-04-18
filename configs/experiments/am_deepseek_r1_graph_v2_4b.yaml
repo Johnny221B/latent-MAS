@@ -33,7 +33,7 @@ training:
   lr: 0.00001
   adjacency_lr: 0.01
   weight_decay: 0.01
-  epochs: 2
+  epochs: 1
   max_seq_len: 8192
   lambda_add: 0.1
   lambda_drop: 0.5
@@ -46,8 +46,8 @@ evaluation:
   run_after_train: false
 
 reasoning:
-  steps_per_agent: 40
-  compress_last_k: 40
+  steps_per_agent: 20
+  compress_last_k: 20
 
 output:
   dir: "outputs/graph_v2/am_deepseek_r1_4b"

@@ -1,0 +1,53 @@
+# RQ3: Our method — Latent communication, chain_4agent, limo (119 samples)
+model:
+  name: "Qwen/Qwen3-4B"
+  dtype: bfloat16
+  frozen: true
+
+graph:
+  config: "configs/graphs/chain_4agent.json"
+  roles_dir: "configs/roles"
+  init_scale: 0.0
+
+compressor:
+  num_queries: 16
+  num_heads: 8
+  dropout: 0.1
+  num_layers: 1
+
+training:
+  task: "am_deepseek_r1_distilled"
+  source: "limo"
+  train_strategy: "communication_only"
+  input_mode: "chat_with_prefix"
+  global_system_prompt: "configs/roles/system_prompts/thinking.json"
+  batch_size: 2
+  lr: 0.00001
+  adjacency_lr: 0.05
+  weight_decay: 0.01
+  epochs: 2
+  max_seq_len: 16384
+  use_amp: true
+  lambda_sparse: 0.05
+  lambda_concentrate: 0.1
+  gradient_accumulation_steps: 4
+  log_interval: 1
+  save_interval: 5000
+
+evaluation:
+  run_after_train: false
+
+reasoning:
+  steps_per_agent: 20
+  compress_last_k: 20
+
+output:
+  dir: "outputs/rq3/latent_limo_4b"
+  log_dir: "logs"
+
+report:
+  use_wandb: true
+  project: "latent-mas"
+  key_env: "WANDB_API_KEY"
+  env_file: ".env"
+  mode: "online"

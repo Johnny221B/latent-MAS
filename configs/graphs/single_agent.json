@@ -1,0 +1,7 @@
+{
+    "agents": ["solver"],
+    "adjacency_prior": [[0]],
+    "execution_order": [0],
+    "terminal_agent_index": 0,
+    "description": "Single agent: solver only (prefix tuning baseline)"
+}

@@ -223,23 +223,41 @@ def _extract_humaneval(text: str) -> str:
     """Extract code completion from HumanEval-style output.
 
     Priority: last <answer> tag > last ```python``` block > raw text.
+    Strips the function signature if the model re-generated it.
     """
+    code = None
+
     # 1. Last <answer> tag (may contain full function)
     matches = list(re.finditer(r"<answer>\s*(.*?)\s*</answer>", text, re.DOTALL))
     if matches:
-        return matches[-1].group(1).strip()
+        code = matches[-1].group(1).strip()
 
     # 2. Last ```python block
-    matches = list(re.finditer(r"```python\s*\n(.*?)```", text, re.DOTALL))
-    if matches:
-        return matches[-1].group(1).strip()
+    if code is None:
+        matches = list(re.finditer(r"```python\s*\n(.*?)```", text, re.DOTALL))
+        if matches:
+            code = matches[-1].group(1).strip()
 
     # 3. Last ``` block (any language)
-    matches = list(re.finditer(r"```\s*\n(.*?)```", text, re.DOTALL))
-    if matches:
-        return matches[-1].group(1).strip()
+    if code is None:
+        matches = list(re.finditer(r"```\s*\n(.*?)```", text, re.DOTALL))
+        if matches:
+            code = matches[-1].group(1).strip()
 
-    return text.strip()
+    if code is None:
+        code = text.strip()
+
+    # Strip function signature if model re-generated it (HumanEval prompt already has it)
+    lines = code.split("\n")
+    body_start = 0
+    for i, line in enumerate(lines):
+        if line.strip().startswith("def "):
+            body_start = i + 1
+            break
+    if body_start > 0 and body_start < len(lines):
+        code = "\n".join(lines[body_start:])
+
+    return code
 
 
 _UNICODE_TO_LATEX = {
@@ -457,14 +475,21 @@ def _intervals_equal(a: str, b: str) -> bool:
     return True
 
 
-def math_is_equivalent(pred: str, gold: str) -> bool:
+def math_is_equivalent(pred: str, gold: str, raw_text: str | None = None) -> bool:
     """Check if two math answers are equivalent.
 
     Tries in order:
     1. Normalized string equality
     2. Numeric equality (handles .5 vs 1/2 vs \\frac{15}{2} vs 7.5)
     3. Interval comparison (handles (1, \\frac{9}{2}) vs (1, 4.5))
-    4. Sympy symbolic equality (handles \\sqrt{x} vs x^{1/2})
+    4. math-verify on extracted answers
+    5. math-verify on raw generated text (fallback when extraction fails)
+    6. Sympy symbolic equality (handles \\sqrt{x} vs x^{1/2})
+
+    Args:
+        pred: extracted prediction string
+        gold: gold answer string
+        raw_text: optional raw generated text for math_verify fallback
     """
     # 1. Normalized string match
     np_, ng = _normalize_math_str(pred), _normalize_math_str(gold)
@@ -499,7 +524,18 @@ def math_is_equivalent(pred: str, gold: str) -> bool:
         except Exception:
             pass
 
-    # 5. Sympy symbolic equality (fallback)
+    # 5. math-verify on raw generated text (when extraction may have failed)
+    if raw_text and len(raw_text) <= 50000:
+        try:
+            from math_verify import parse as mv_parse, verify as mv_verify
+            g = mv_parse(gold)
+            a = mv_parse(raw_text)
+            if mv_verify(g, a):
+                return True
+        except Exception:
+            pass
+
+    # 6. Sympy symbolic equality (fallback)
     sp = _try_parse_sympy(pred)
     sg = _try_parse_sympy(gold)
     if sp is not None and sg is not None:
@@ -517,7 +553,7 @@ def math_is_equivalent(pred: str, gold: str) -> bool:
 # Tasks that should use math_is_equivalent for comparison
 MATH_EQUIVALENT_TASKS = {
     "math", "math500", "minerva_math", "competition_math",
-    "aime2025", "amc23",
+    "aime2025", "aime2026", "amc23",
 }
 
 
@@ -529,7 +565,10 @@ EXTRACTORS = {
     "arc_challenge": _extract_arc,
     "medqa": _extract_arc,  # also multiple choice
     "aime2025": _extract_math,
+    "aime2026": _extract_math,
     "amc23": _extract_math,
+    "gpqa_diamond": _extract_math,
+    "medqa": _extract_math,
     "competition_math": _extract_competition_math,
     "math": _extract_math,
     "math500": _extract_math,
